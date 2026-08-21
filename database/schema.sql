@@ -131,6 +131,39 @@ CREATE TABLE IF NOT EXISTS payments (
     CONSTRAINT payments_user_fk FOREIGN KEY (recorded_by) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS payment_reconciliations (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id BIGINT UNSIGNED NOT NULL,
+    invoice_id BIGINT UNSIGNED NULL,
+    payment_id BIGINT UNSIGNED NULL,
+    external_reference VARCHAR(100) NOT NULL,
+    invoice_number VARCHAR(50) NOT NULL,
+    amount DECIMAL(15,2) NOT NULL,
+    paid_at DATETIME NOT NULL,
+    method VARCHAR(40) NOT NULL,
+    payer_name VARCHAR(120) NULL,
+    match_status ENUM('matched', 'unmatched', 'posted', 'ignored') NOT NULL,
+    match_reason VARCHAR(40) NOT NULL,
+    import_batch CHAR(32) NOT NULL,
+    source_file VARCHAR(120) NOT NULL,
+    created_by BIGINT UNSIGNED NOT NULL,
+    posted_by BIGINT UNSIGNED NULL,
+    posted_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY payment_reconciliations_tenant_method_reference_unique
+        (tenant_id, method, external_reference),
+    KEY payment_reconciliations_tenant_status_idx (tenant_id, match_status, created_at),
+    KEY payment_reconciliations_batch_idx (tenant_id, import_batch),
+    KEY payment_reconciliations_invoice_idx (invoice_id),
+    CONSTRAINT payment_reconciliations_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT payment_reconciliations_invoice_fk FOREIGN KEY (invoice_id) REFERENCES invoices (id) ON DELETE RESTRICT,
+    CONSTRAINT payment_reconciliations_payment_fk FOREIGN KEY (payment_id) REFERENCES payments (id) ON DELETE RESTRICT,
+    CONSTRAINT payment_reconciliations_created_user_fk FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT payment_reconciliations_posted_user_fk FOREIGN KEY (posted_by) REFERENCES users (id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS notification_outbox (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     tenant_id BIGINT UNSIGNED NOT NULL,

@@ -953,6 +953,300 @@ if ($path === '/notifications' && $method === 'GET') {
     exit;
 }
 
+if ($path === '/reconciliation/template' && $method === 'GET') {
+    Auth::requireBillingAccess();
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="template-rekonsiliasi-rsbilling.csv"');
+    header('Cache-Control: no-store');
+    $output = fopen('php://output', 'wb');
+    if ($output === false) {
+        throw new RuntimeException('Template rekonsiliasi tidak dapat dibuat.');
+    }
+    fwrite($output, "\xEF\xBB\xBF");
+    CsvService::writeRow($output, [
+        'external_reference', 'invoice_number', 'amount', 'paid_at', 'method', 'payer_name',
+    ]);
+    CsvService::writeRow($output, [
+        'TRX-000001', 'INV-GANTI-SESUAI-DATA', '150000.00', date('Y-m-d H:i:s'), 'bank_transfer', 'Nama Pembayar',
+    ]);
+    fclose($output);
+    exit;
+}
+
+if ($path === '/reconciliation/import' && $method === 'POST') {
+    Auth::requireBillingAccess();
+    verify_csrf();
+    $upload = $_FILES['csv_file'] ?? null;
+    if (!is_array($upload) || ($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
+        || !is_string($upload['tmp_name'] ?? null) || !is_string($upload['name'] ?? null)) {
+        flash('error', 'Pilih file rekonsiliasi CSV yang valid.');
+        redirect('/reconciliation');
+    }
+    $fileSize = (int) ($upload['size'] ?? 0);
+    if ($fileSize < 1 || $fileSize > 2 * 1024 * 1024) {
+        flash('error', 'Ukuran file rekonsiliasi harus berada di antara 1 byte dan 2 MB.');
+        redirect('/reconciliation');
+    }
+    if (strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION)) !== 'csv'
+        || !is_uploaded_file($upload['tmp_name'])) {
+        flash('error', 'File rekonsiliasi wajib berformat CSV dan berasal dari upload yang sah.');
+        redirect('/reconciliation');
+    }
+
+    try {
+        $rows = PaymentReconciliationService::parseCsv($upload['tmp_name']);
+        $batch = bin2hex(random_bytes(16));
+        $sourceName = preg_replace('/[^A-Za-z0-9._-]/', '_', basename($upload['name'])) ?: 'reconciliation.csv';
+        $sourceName = substr($sourceName, 0, 120);
+        $counts = ['matched' => 0, 'unmatched' => 0, 'duplicate' => 0];
+
+        $db->beginTransaction();
+        try {
+            $preparedRows = PaymentReconciliationService::prepareRows($db, $tenantId, $rows);
+            $insert = $db->prepare(
+                'INSERT INTO payment_reconciliations
+                    (tenant_id, invoice_id, external_reference, invoice_number, amount, paid_at,
+                     method, payer_name, match_status, match_reason, import_batch, source_file, created_by)
+                 VALUES
+                    (:tenant_id, :invoice_id, :external_reference, :invoice_number, :amount, :paid_at,
+                     :method, :payer_name, :match_status, :match_reason, :import_batch, :source_file, :created_by)
+                 ON DUPLICATE KEY UPDATE id = id'
+            );
+            foreach ($preparedRows as $row) {
+                $insert->execute([
+                    'tenant_id' => $tenantId,
+                    'invoice_id' => $row['invoice_id'],
+                    'external_reference' => $row['external_reference'],
+                    'invoice_number' => $row['invoice_number'],
+                    'amount' => $row['amount'],
+                    'paid_at' => $row['paid_at'],
+                    'method' => $row['method'],
+                    'payer_name' => $row['payer_name'],
+                    'match_status' => $row['match_status'],
+                    'match_reason' => $row['match_reason'],
+                    'import_batch' => $batch,
+                    'source_file' => $sourceName,
+                    'created_by' => (int) Auth::user()['id'],
+                ]);
+                if ($insert->rowCount() === 1) {
+                    $counts[$row['match_status']]++;
+                } else {
+                    $counts['duplicate']++;
+                }
+            }
+            audit_event($db, 'reconciliation.imported', 'reconciliation_batch', null, [
+                'batch' => $batch,
+                'file_name' => $sourceName,
+                'source_rows' => count($rows),
+                'matched' => $counts['matched'],
+                'unmatched' => $counts['unmatched'],
+                'duplicate' => $counts['duplicate'],
+            ]);
+            $db->commit();
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            throw $exception;
+        }
+
+        flash('success', sprintf(
+            'Import selesai: %d cocok, %d perlu pemeriksaan, dan %d referensi duplikat dilewati.',
+            $counts['matched'],
+            $counts['unmatched'],
+            $counts['duplicate']
+        ));
+    } catch (InvalidArgumentException $exception) {
+        flash('error', $exception->getMessage());
+    }
+    redirect('/reconciliation');
+}
+
+if ($path === '/reconciliation' && $method === 'POST') {
+    Auth::requireBillingAccess();
+    verify_csrf();
+    $action = input('_action');
+    $reconciliationId = filter_var(input('reconciliation_id'), FILTER_VALIDATE_INT);
+    if (!in_array($action, ['post', 'rematch', 'ignore'], true) || !$reconciliationId) {
+        flash('error', 'Aksi atau transaksi rekonsiliasi tidak valid.');
+        redirect('/reconciliation');
+    }
+
+    $db->beginTransaction();
+    try {
+        if ($action === 'post') {
+            $result = PaymentReconciliationService::post(
+                $db,
+                $tenantId,
+                (int) Auth::user()['id'],
+                (int) $reconciliationId
+            );
+            $invalidatedMatches = PaymentReconciliationService::invalidateInvoiceMatches(
+                $db,
+                $tenantId,
+                $result['invoice_id']
+            );
+            $cancelledNotifications = NotificationService::cancelInvoiceNotifications(
+                $db,
+                $tenantId,
+                $result['invoice_id']
+            );
+            audit_event($db, 'payment.reconciled', 'payment', $result['payment_id'], [
+                'reconciliation_id' => (int) $reconciliationId,
+                'invoice_id' => $result['invoice_id'],
+                'reference' => $result['reference'],
+                'method' => $result['method'],
+                'invalidated_matches' => $invalidatedMatches,
+                'cancelled_notifications' => $cancelledNotifications,
+            ]);
+            $message = 'Pembayaran berhasil diposting dan invoice ditandai lunas.';
+        } elseif ($action === 'rematch') {
+            $match = PaymentReconciliationService::rematch($db, $tenantId, (int) $reconciliationId);
+            audit_event($db, 'reconciliation.rematched', 'payment_reconciliation', (int) $reconciliationId, [
+                'status' => $match['match_status'],
+                'reason' => $match['match_reason'],
+                'invoice_id' => $match['invoice_id'],
+            ]);
+            $message = $match['match_status'] === 'matched'
+                ? 'Transaksi sekarang cocok dan siap diposting.'
+                : 'Transaksi masih belum cocok. Periksa nomor invoice dan nominal.';
+        } else {
+            PaymentReconciliationService::ignore($db, $tenantId, (int) $reconciliationId);
+            audit_event($db, 'reconciliation.ignored', 'payment_reconciliation', (int) $reconciliationId);
+            $message = 'Transaksi rekonsiliasi ditandai diabaikan.';
+        }
+        $db->commit();
+        flash('success', $message);
+    } catch (Throwable $exception) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        if ($exception instanceof DomainException) {
+            flash('error', $exception->getMessage());
+        } else {
+            throw $exception;
+        }
+    }
+    redirect('/reconciliation');
+}
+
+if ($path === '/reconciliation' && $method === 'GET') {
+    Auth::requireBillingAccess();
+    $statusFilter = query_input('status');
+    if (!in_array($statusFilter, ['', 'matched', 'unmatched', 'posted', 'ignored'], true)) {
+        $statusFilter = '';
+    }
+
+    $statusCounts = ['matched' => 0, 'unmatched' => 0, 'posted' => 0, 'ignored' => 0];
+    $summaryQuery = $db->prepare(
+        'SELECT match_status, COUNT(*) AS total FROM payment_reconciliations
+         WHERE tenant_id = :tenant_id GROUP BY match_status'
+    );
+    $summaryQuery->execute(['tenant_id' => $tenantId]);
+    foreach ($summaryQuery as $summary) {
+        $statusCounts[(string) $summary['match_status']] = (int) $summary['total'];
+    }
+
+    $where = ['r.tenant_id = :tenant_id'];
+    $params = ['tenant_id' => $tenantId];
+    if ($statusFilter !== '') {
+        $where[] = 'r.match_status = :status';
+        $params['status'] = $statusFilter;
+    }
+    $whereSql = implode(' AND ', $where);
+    $countQuery = $db->prepare('SELECT COUNT(*) FROM payment_reconciliations r WHERE ' . $whereSql);
+    $countQuery->execute($params);
+    $pagination = new Pagination((int) $countQuery->fetchColumn(), requested_page());
+    $itemsQuery = $db->prepare(
+        'SELECT r.id, r.invoice_id, r.payment_id, r.external_reference, r.invoice_number,
+                r.amount, r.paid_at, r.method, r.payer_name, r.match_status, r.match_reason,
+                r.source_file, r.created_at, i.status AS invoice_status, u.name AS created_by_name
+         FROM payment_reconciliations r
+         LEFT JOIN invoices i ON i.id = r.invoice_id AND i.tenant_id = r.tenant_id
+         INNER JOIN users u ON u.id = r.created_by
+         WHERE ' . $whereSql . ' ORDER BY r.id DESC LIMIT :limit OFFSET :offset'
+    );
+    foreach ($params as $key => $value) {
+        $itemsQuery->bindValue(':' . $key, $value);
+    }
+    $itemsQuery->bindValue(':limit', $pagination->perPage, PDO::PARAM_INT);
+    $itemsQuery->bindValue(':offset', $pagination->offset(), PDO::PARAM_INT);
+    $itemsQuery->execute();
+    $items = $itemsQuery->fetchAll();
+
+    $reasonLabels = [
+        'exact_match' => 'Nomor dan nominal cocok',
+        'invoice_not_found' => 'Invoice tidak ditemukan',
+        'invoice_not_payable' => 'Invoice bukan belum lunas',
+        'amount_mismatch' => 'Nominal berbeda',
+    ];
+    View::header('Rekonsiliasi Pembayaran');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Kontrol penerimaan</p><h1>Rekonsiliasi pembayaran</h1></div>
+        <a class="button button-secondary" href="/reconciliation/template">Unduh template CSV</a>
+    </div>
+    <section class="stat-grid">
+        <article class="stat-card"><span>Cocok</span><strong><?= e($statusCounts['matched']) ?></strong><small>Siap diposting</small></article>
+        <article class="stat-card"><span>Perlu diperiksa</span><strong><?= e($statusCounts['unmatched']) ?></strong><small>Tidak mengubah kas</small></article>
+        <article class="stat-card"><span>Sudah diposting</span><strong><?= e($statusCounts['posted']) ?></strong><small>Invoice dilunasi</small></article>
+        <article class="stat-card"><span>Diabaikan</span><strong><?= e($statusCounts['ignored']) ?></strong><small>Tersimpan untuk audit</small></article>
+    </section>
+    <section class="account-grid">
+        <article class="panel">
+            <h2>Import mutasi CSV</h2>
+            <p class="muted">Maksimal 2 MB dan 1.000 transaksi. Import hanya membuat staging; pembayaran baru tercatat setelah tombol Posting dipilih.</p>
+            <form method="post" action="/reconciliation/import" enctype="multipart/form-data" class="stack-form">
+                <?= csrf_field() ?>
+                <label>File mutasi<input type="file" name="csv_file" accept=".csv,text/csv" required></label>
+                <button class="button button-primary" type="submit">Validasi dan import</button>
+            </form>
+        </article>
+        <article class="panel">
+            <h2>Aturan exact-match</h2>
+            <dl class="detail-list">
+                <div><dt>Invoice</dt><dd>Nomor harus sama persis dan berada pada ISP aktif</dd></div>
+                <div><dt>Nominal</dt><dd>Harus sama dengan total invoice; tanpa pemisah ribuan</dd></div>
+                <div><dt>Referensi</dt><dd>Unik untuk kombinasi ISP dan metode</dd></div>
+                <div><dt>Format tanggal</dt><dd>YYYY-MM-DD atau YYYY-MM-DD HH:MM:SS</dd></div>
+            </dl>
+        </article>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Staging transaksi</h2><p class="muted">Periksa transaksi cocok sebelum memposting pembayaran.</p></div></div>
+        <form method="get" class="compact-form form-grid reconciliation-filter">
+            <label>Status<select name="status"><option value="">Semua status</option><?php foreach (['matched', 'unmatched', 'posted', 'ignored'] as $status): ?><option value="<?= e($status) ?>"<?= $statusFilter === $status ? ' selected' : '' ?>><?= e($status) ?></option><?php endforeach; ?></select></label>
+            <div class="form-action"><button class="button button-primary" type="submit">Terapkan</button><a class="button button-secondary" href="/reconciliation">Reset</a></div>
+        </form>
+        <div class="table-wrap">
+            <table><thead><tr><th>Waktu bayar</th><th>Referensi</th><th>Invoice</th><th>Nominal</th><th>Metode/pembayar</th><th>Hasil</th><th>Sumber</th><th>Aksi</th></tr></thead><tbody>
+                <?php if ($items === []): ?><tr><td colspan="8" class="muted">Belum ada transaksi rekonsiliasi.</td></tr><?php endif; ?>
+                <?php foreach ($items as $item): ?>
+                    <tr>
+                        <td><?= e($item['paid_at']) ?><small>Import <?= e($item['created_at']) ?></small></td>
+                        <td><strong><?= e($item['external_reference']) ?></strong></td>
+                        <td><?php if ($item['invoice_id']): ?><a class="table-link" href="/invoices/view?id=<?= e($item['invoice_id']) ?>"><?= e($item['invoice_number']) ?></a><small><?= e($item['invoice_status'] ?: '—') ?></small><?php else: ?><?= e($item['invoice_number']) ?><?php endif; ?></td>
+                        <td><?= e(rupiah($item['amount'])) ?></td>
+                        <td><?= e($item['method']) ?><small><?= e($item['payer_name'] ?: '—') ?></small></td>
+                        <td><span class="status status-<?= e($item['match_status']) ?>"><?= e($item['match_status']) ?></span><small><?= e($reasonLabels[$item['match_reason']] ?? $item['match_reason']) ?></small></td>
+                        <td><?= e($item['source_file']) ?><small><?= e($item['created_by_name']) ?></small></td>
+                        <td><div class="action-group">
+                            <?php if ($item['match_status'] === 'matched'): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="post"><input type="hidden" name="reconciliation_id" value="<?= e($item['id']) ?>"><button class="button button-small" type="submit">Posting</button></form><?php endif; ?>
+                            <?php if ($item['match_status'] === 'unmatched'): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="rematch"><input type="hidden" name="reconciliation_id" value="<?= e($item['id']) ?>"><button class="button button-link" type="submit">Cocokkan ulang</button></form><?php endif; ?>
+                            <?php if (in_array($item['match_status'], ['matched', 'unmatched'], true)): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="ignore"><input type="hidden" name="reconciliation_id" value="<?= e($item['id']) ?>"><button class="button button-danger" type="submit">Abaikan</button></form><?php endif; ?>
+                            <?php if ($item['match_status'] === 'posted'): ?><span class="muted">Payment #<?= e($item['payment_id']) ?></span><?php endif; ?>
+                        </div></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+        <?php View::pagination($pagination); ?>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
 if ($path === '/invoices' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
@@ -992,8 +1286,14 @@ if ($path === '/invoices' && $method === 'POST') {
             ]);
             $db->prepare("UPDATE invoices SET status = 'paid', paid_at = NOW() WHERE id = :id AND tenant_id = :tenant_id")
                 ->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
+            $invalidatedMatches = PaymentReconciliationService::invalidateInvoiceMatches(
+                $db,
+                $tenantId,
+                (int) $invoiceId
+            );
             $cancelledNotifications = NotificationService::cancelInvoiceNotifications($db, $tenantId, (int) $invoiceId);
             audit_event($db, 'invoice.paid', 'invoice', (int) $invoiceId, [
+                'invalidated_matches' => $invalidatedMatches,
                 'cancelled_notifications' => $cancelledNotifications,
             ]);
             $db->commit();
@@ -1030,8 +1330,14 @@ if ($path === '/invoices' && $method === 'POST') {
                 "UPDATE invoices SET status = 'cancelled'
                  WHERE id = :id AND tenant_id = :tenant_id"
             )->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
+            $invalidatedMatches = PaymentReconciliationService::invalidateInvoiceMatches(
+                $db,
+                $tenantId,
+                (int) $invoiceId
+            );
             $cancelledNotifications = NotificationService::cancelInvoiceNotifications($db, $tenantId, (int) $invoiceId);
             audit_event($db, 'invoice.cancelled', 'invoice', (int) $invoiceId, [
+                'invalidated_matches' => $invalidatedMatches,
                 'cancelled_notifications' => $cancelledNotifications,
             ]);
             $db->commit();
@@ -1088,10 +1394,17 @@ if ($path === '/invoices' && $method === 'POST') {
                 'id' => $invoiceId,
                 'tenant_id' => $tenantId,
             ]);
+            $invalidatedMatches = PaymentReconciliationService::invalidateInvoiceMatches(
+                $db,
+                $tenantId,
+                (int) $invoiceId,
+                'amount_mismatch'
+            );
             audit_event($db, 'invoice.penalty_updated', 'invoice', (int) $invoiceId, [
                 'previous_penalty' => $invoice['penalty_amount'],
                 'penalty_amount' => $penaltyAmount,
                 'amount' => $total,
+                'invalidated_matches' => $invalidatedMatches,
             ]);
             $db->commit();
             flash('success', 'Denda keterlambatan dan total invoice berhasil diperbarui.');

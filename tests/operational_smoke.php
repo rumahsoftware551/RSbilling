@@ -6,6 +6,7 @@ require_once dirname(__DIR__) . '/app/BillingService.php';
 require_once dirname(__DIR__) . '/app/CsvService.php';
 require_once dirname(__DIR__) . '/app/CustomerImportService.php';
 require_once dirname(__DIR__) . '/app/NotificationService.php';
+require_once dirname(__DIR__) . '/app/PaymentReconciliationService.php';
 require_once dirname(__DIR__) . '/app/Pagination.php';
 require_once dirname(__DIR__) . '/app/ReportService.php';
 
@@ -109,6 +110,40 @@ assert_operational(
     'Isi pesan invoice wajib memuat nomor dan total tagihan.'
 );
 
+$reconciliationPath = tempnam(sys_get_temp_dir(), 'rsbilling-reconciliation-');
+assert_operational(is_string($reconciliationPath), 'File sementara rekonsiliasi wajib dapat dibuat.');
+file_put_contents(
+    $reconciliationPath,
+    "\xEF\xBB\xBFexternal_reference;invoice_number;amount;paid_at;method;payer_name\n"
+    . "TRX-001;INV-TEST-001;150000,00;2026-08-20;bank_transfer;Pelanggan Uji\n"
+);
+try {
+    $reconciliationRows = PaymentReconciliationService::parseCsv($reconciliationPath);
+} finally {
+    unlink($reconciliationPath);
+}
+assert_operational(count($reconciliationRows) === 1, 'Parser rekonsiliasi harus membaca satu transaksi.');
+assert_operational($reconciliationRows[0]['amount'] === '150000.00', 'Nominal rekonsiliasi harus dinormalisasi.');
+assert_operational(
+    $reconciliationRows[0]['paid_at'] === '2026-08-20 00:00:00',
+    'Tanggal rekonsiliasi harus dinormalisasi.'
+);
+$exactMatch = PaymentReconciliationService::classifyInvoice([
+    'id' => 7,
+    'amount' => '150000.00',
+    'status' => 'unpaid',
+], '150000.00');
+assert_operational(
+    $exactMatch['match_status'] === 'matched' && $exactMatch['invoice_id'] === 7,
+    'Invoice dan nominal yang sama wajib berstatus matched.'
+);
+$amountMismatch = PaymentReconciliationService::classifyInvoice([
+    'id' => 7,
+    'amount' => '160000.00',
+    'status' => 'unpaid',
+], '150000.00');
+assert_operational($amountMismatch['match_reason'] === 'amount_mismatch', 'Nominal berbeda wajib ditolak exact-match.');
+
 $pagination = new Pagination(45, 3, 20);
 assert_operational($pagination->page === 3, 'Halaman aktif tidak sesuai.');
 assert_operational($pagination->offset() === 40, 'Offset pagination tidak sesuai.');
@@ -141,6 +176,12 @@ assert_operational(
         && str_contains($schema, 'notification_outbox_tenant_idempotency_unique (tenant_id, idempotency_key)')
         && str_contains($schema, 'notification_outbox_tenant_queue_idx (tenant_id, status, available_at)'),
     'Outbox notifikasi wajib memiliki isolasi tenant, idempotensi, dan index antrean.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS payment_reconciliations')
+        && str_contains($schema, 'payment_reconciliations_tenant_method_reference_unique')
+        && str_contains($schema, 'payment_reconciliations_tenant_status_idx (tenant_id, match_status, created_at)'),
+    'Staging rekonsiliasi wajib memiliki isolasi tenant, referensi unik, dan index status.'
 );
 assert_operational(
     str_contains($installer, "if (!\$columnExists(\$db, 'invoices', 'base_amount'))")
@@ -201,6 +242,15 @@ assert_operational(
         && str_contains($routes, "audit_event(\$db, 'notification.queued'")
         && str_contains($routes, "if (\$path === '/notifications' && \$method === 'GET')"),
     'Antrean notifikasi wajib memiliki enqueue, audit, dan halaman operasional.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/reconciliation/import' && \$method === 'POST')")
+        && str_contains($routes, 'PaymentReconciliationService::prepareRows(')
+        && str_contains($routes, 'PaymentReconciliationService::post(')
+        && str_contains($routes, 'PaymentReconciliationService::invalidateInvoiceMatches(')
+        && str_contains($routes, "audit_event(\$db, 'payment.reconciled'")
+        && str_contains($routes, "if (\$path === '/reconciliation' && \$method === 'GET')"),
+    'Rekonsiliasi wajib memiliki import, exact-match, posting, audit, dan UI.'
 );
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");

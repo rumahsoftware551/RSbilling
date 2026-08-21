@@ -23,6 +23,7 @@ Sudah tersedia:
 - laporan pendapatan tagihan, kas masuk, aging piutang, dan prioritas penagihan;
 - import pelanggan CSV atomik serta export tagihan dan kas CSV yang aman untuk Excel;
 - notification outbox WhatsApp/email per tenant dengan template invoice, idempotensi, retry, auto-cancel saat invoice selesai, dan audit;
+- rekonsiliasi pembayaran CSV dengan staging, exact-match invoice/nominal, posting atomik, serta pencegahan referensi duplikat;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;

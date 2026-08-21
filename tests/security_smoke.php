@@ -22,6 +22,7 @@ $nginx = file_get_contents(dirname(__DIR__) . '/docker/nginx/default.conf') ?: '
 $envExample = file_get_contents(dirname(__DIR__) . '/.env.example') ?: '';
 $routes = file_get_contents(dirname(__DIR__) . '/public/index.php') ?: '';
 $notificationService = file_get_contents(dirname(__DIR__) . '/app/NotificationService.php') ?: '';
+$reconciliationService = file_get_contents(dirname(__DIR__) . '/app/PaymentReconciliationService.php') ?: '';
 
 expect(str_contains($auth, 'password_verify'), 'Login wajib memakai password_verify.');
 expect(str_contains($auth, 'session_regenerate_id(true)'), 'Login wajib meregenerasi session ID.');
@@ -57,6 +58,17 @@ expect(
         && str_contains($notificationService, "AND n.status IN ('failed', 'cancelled') AND i.status = 'unpaid'")
         && str_contains($schema, 'notification_outbox_tenant_idempotency_unique (tenant_id, idempotency_key)'),
     'Outbox notifikasi wajib terlindungi role, CSRF, isolasi tenant, dan idempotensi.'
+);
+expect(
+    str_contains($routes, "if (\$path === '/reconciliation/import' && \$method === 'POST') {\n    Auth::requireBillingAccess();\n    verify_csrf();")
+        && str_contains($reconciliationService, 'WHERE tenant_id = :tenant_id AND invoice_number IN')
+        && str_contains($reconciliationService, ")\n                 FOR UPDATE")
+        && str_contains($reconciliationService, 'WHERE r.id = :id AND r.tenant_id = :tenant_id LIMIT 1 FOR UPDATE')
+        && str_contains($reconciliationService, "if (\$invoiceUpdate->rowCount() !== 1)")
+        && str_contains($reconciliationService, "AND match_status = 'matched'")
+        && str_contains($reconciliationService, "WHERE invoice_id = :invoice_id AND tenant_id = :tenant_id AND match_status = 'matched'")
+        && str_contains($schema, 'payment_reconciliations_tenant_method_reference_unique'),
+    'Rekonsiliasi wajib terlindungi CSRF, tenant scope, lock, status, dan referensi unik.'
 );
 
 $paths = [dirname(__DIR__) . '/app', dirname(__DIR__) . '/public', dirname(__DIR__) . '/database'];

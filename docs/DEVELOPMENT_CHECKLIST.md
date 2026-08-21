@@ -38,7 +38,8 @@ Checklist ini diperbarui setiap kali satu milestone selesai dan telah melewati p
 - [x] import pelanggan CSV atomik serta export tagihan dan kas CSV
 - [x] notification outbox per tenant, template invoice, idempotensi, retry, auto-cancel invoice selesai, dan audit
 - [ ] adapter provider WhatsApp/email serta background worker
-- [ ] rekonsiliasi pembayaran
+- [x] rekonsiliasi pembayaran CSV dengan staging, exact-match, posting atomik, dan audit
+- [ ] adapter mutasi bank/payment gateway otomatis
 
 ## Fase 3 — Network automation
 
