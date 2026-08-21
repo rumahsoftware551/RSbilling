@@ -30,9 +30,9 @@ Status: sedang dikerjakan pada branch `codex/security-runtime-hardening`.
 - [x] detail pelanggan/invoice, histori pembayaran, dan arsip data yang aman;
 - [x] pajak, diskon, prorata, denda idempotent, dan invoice siap cetak/PDF;
 - [x] laporan pendapatan tagihan, kas masuk, aging piutang, dan prioritas penagihan;
+- [x] import pelanggan CSV tervalidasi serta export tagihan dan kas CSV;
 - notifikasi WhatsApp/email dengan antrean;
 - rekonsiliasi pembayaran;
-- import pelanggan dari CSV dengan validasi.
 
 ## Fase 3 — Network automation
 

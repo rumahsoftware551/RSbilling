@@ -282,6 +282,223 @@ if ($path === '/users' && $method === 'POST') {
     redirect('/users');
 }
 
+if ($path === '/customers/import/template' && $method === 'GET') {
+    Auth::requireBillingAccess();
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="template-pelanggan-rsbilling.csv"');
+    header('Cache-Control: no-store');
+    $output = fopen('php://output', 'wb');
+    if ($output === false) {
+        throw new RuntimeException('Template CSV tidak dapat dibuat.');
+    }
+    fwrite($output, "\xEF\xBB\xBF");
+    CsvService::writeRow($output, ['customer_code', 'name', 'phone', 'email', 'address', 'plan_code', 'status']);
+    CsvService::writeRow($output, ['CUST-001', 'Pelanggan Contoh', '081234567890', 'pelanggan@example.com', 'Alamat pelanggan', '', 'active']);
+    fclose($output);
+    exit;
+}
+
+if ($path === '/customers/import' && $method === 'POST') {
+    Auth::requireBillingAccess();
+    verify_csrf();
+    $upload = $_FILES['csv_file'] ?? null;
+    if (!is_array($upload) || ($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
+        || !is_string($upload['tmp_name'] ?? null) || !is_string($upload['name'] ?? null)) {
+        flash('error', 'Pilih file CSV pelanggan yang valid.');
+        redirect('/customers/import');
+    }
+    $fileSize = (int) ($upload['size'] ?? 0);
+    if ($fileSize < 1 || $fileSize > 2 * 1024 * 1024) {
+        flash('error', 'Ukuran file CSV harus berada di antara 1 byte dan 2 MB.');
+        redirect('/customers/import');
+    }
+    if (strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION)) !== 'csv'
+        || !is_uploaded_file($upload['tmp_name'])) {
+        flash('error', 'File wajib berformat CSV dan berasal dari upload yang sah.');
+        redirect('/customers/import');
+    }
+
+    try {
+        $rows = CustomerImportService::parse($upload['tmp_name']);
+
+        $planQuery = $db->prepare(
+            "SELECT id, code FROM plans
+             WHERE tenant_id = :tenant_id AND status = 'active'"
+        );
+        $planQuery->execute(['tenant_id' => $tenantId]);
+        $planMap = [];
+        foreach ($planQuery as $plan) {
+            $planMap[strtoupper((string) $plan['code'])] = (int) $plan['id'];
+        }
+
+        $candidates = [];
+        $seenCodes = [];
+        foreach ($rows as $row) {
+            $rowNumber = (int) $row['_row'];
+            $code = strtoupper($row['customer_code']);
+            $name = $row['name'];
+            $phone = $row['phone'];
+            $email = strtolower($row['email']);
+            $address = $row['address'];
+            $planCode = strtoupper($row['plan_code']);
+            $status = strtolower($row['status'] !== '' ? $row['status'] : 'active');
+
+            if (!preg_match('/^[A-Z0-9._-]{2,30}$/', $code)) {
+                throw new InvalidArgumentException('Baris ' . $rowNumber . ': customer_code tidak valid.');
+            }
+            if ($name === '' || strlen($name) > 120) {
+                throw new InvalidArgumentException('Baris ' . $rowNumber . ': nama wajib diisi dan maksimal 120 karakter.');
+            }
+            if (strlen($phone) > 30 || strlen($address) > 2000) {
+                throw new InvalidArgumentException('Baris ' . $rowNumber . ': nomor telepon atau alamat terlalu panjang.');
+            }
+            if ($email !== '' && (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 190)) {
+                throw new InvalidArgumentException('Baris ' . $rowNumber . ': email tidak valid.');
+            }
+            if (!in_array($status, ['active', 'suspended', 'terminated'], true)) {
+                throw new InvalidArgumentException('Baris ' . $rowNumber . ': status pelanggan tidak valid.');
+            }
+            if ($planCode !== '' && !isset($planMap[$planCode])) {
+                throw new InvalidArgumentException('Baris ' . $rowNumber . ': plan_code tidak ditemukan atau paket tidak aktif.');
+            }
+            if (isset($seenCodes[$code])) {
+                throw new InvalidArgumentException('Baris ' . $rowNumber . ': customer_code berulang di dalam file.');
+            }
+            $seenCodes[$code] = true;
+
+            $candidates[] = [
+                'tenant_id' => $tenantId,
+                'plan_id' => $planCode !== '' ? $planMap[$planCode] : null,
+                'customer_code' => $code,
+                'name' => $name,
+                'phone' => $phone,
+                'email' => $email !== '' ? $email : null,
+                'address' => $address !== '' ? $address : null,
+                'status' => $status,
+            ];
+        }
+
+        $existingParams = ['tenant_id' => $tenantId];
+        $existingPlaceholders = [];
+        foreach ($candidates as $index => $candidate) {
+            $key = 'code_' . $index;
+            $existingPlaceholders[] = ':' . $key;
+            $existingParams[$key] = $candidate['customer_code'];
+        }
+        $existingQuery = $db->prepare(
+            'SELECT customer_code FROM customers
+             WHERE tenant_id = :tenant_id AND customer_code IN (' . implode(', ', $existingPlaceholders) . ')'
+        );
+        $existingQuery->execute($existingParams);
+        $existingCodes = [];
+        foreach ($existingQuery as $customer) {
+            $existingCodes[strtoupper((string) $customer['customer_code'])] = true;
+        }
+
+        $validated = [];
+        $skipped = 0;
+        foreach ($candidates as $candidate) {
+            if (isset($existingCodes[$candidate['customer_code']])) {
+                $skipped++;
+                continue;
+            }
+            $validated[] = $candidate;
+        }
+
+        $db->beginTransaction();
+        try {
+            $insert = $db->prepare(
+                'INSERT INTO customers
+                    (tenant_id, plan_id, customer_code, name, phone, email, address, status)
+                 VALUES
+                    (:tenant_id, :plan_id, :customer_code, :name, :phone, :email, :address, :status)'
+            );
+            foreach ($validated as $customer) {
+                $insert->execute($customer);
+            }
+            $sourceName = preg_replace('/[^A-Za-z0-9._-]/', '_', basename($upload['name'])) ?: 'customers.csv';
+            audit_event($db, 'customer.csv_imported', 'customer_batch', null, [
+                'created' => count($validated),
+                'skipped_existing' => $skipped,
+                'source_rows' => count($rows),
+                'file_name' => substr($sourceName, 0, 120),
+            ]);
+            $db->commit();
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            throw $exception;
+        }
+
+        flash('success', sprintf(
+            'Import selesai: %d pelanggan dibuat dan %d kode yang sudah ada dilewati.',
+            count($validated),
+            $skipped
+        ));
+        redirect('/customers');
+    } catch (InvalidArgumentException $exception) {
+        flash('error', $exception->getMessage());
+        redirect('/customers/import');
+    } catch (PDOException $exception) {
+        if ($exception->getCode() === '23000') {
+            flash('error', 'Data pelanggan berubah saat import. Muat ulang dan ulangi import.');
+            redirect('/customers/import');
+        }
+        throw $exception;
+    }
+}
+
+if ($path === '/customers/import' && $method === 'GET') {
+    Auth::requireBillingAccess();
+    $planQuery = $db->prepare(
+        "SELECT code, name, speed_label FROM plans
+         WHERE tenant_id = :tenant_id AND status = 'active' ORDER BY code"
+    );
+    $planQuery->execute(['tenant_id' => $tenantId]);
+    $activePlans = $planQuery->fetchAll();
+    View::header('Import pelanggan');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Migrasi data</p><h1>Import pelanggan CSV</h1></div>
+        <a class="button button-secondary" href="/customers">Kembali</a>
+    </div>
+    <section class="account-grid import-grid">
+        <article class="panel">
+            <h2>Upload file CSV</h2>
+            <p class="muted">Import bersifat atomik: apabila satu baris tidak valid, tidak ada pelanggan baru yang disimpan. Kode pelanggan yang sudah tersedia pada ISP ini akan dilewati.</p>
+            <form method="post" enctype="multipart/form-data" class="stack-form">
+                <?= csrf_field() ?>
+                <label>File pelanggan
+                    <input type="file" name="csv_file" accept=".csv,text/csv" required>
+                </label>
+                <small class="muted">Maksimal 2 MB dan 1.000 baris. Pemisah koma atau titik koma didukung.</small>
+                <button class="button button-primary" type="submit">Validasi dan import</button>
+            </form>
+        </article>
+        <article class="panel">
+            <div class="section-heading"><div><h2>Format yang didukung</h2><p class="muted">Gunakan template agar nama kolom sesuai.</p></div><a class="button button-link" href="/customers/import/template">Unduh template</a></div>
+            <div class="table-wrap"><table><thead><tr><th>Kolom</th><th>Ketentuan</th></tr></thead><tbody>
+                <tr><td><code>customer_code</code></td><td>Wajib, unik, 2–30 karakter</td></tr>
+                <tr><td><code>name</code></td><td>Wajib, maksimal 120 karakter</td></tr>
+                <tr><td><code>phone, email, address</code></td><td>Opsional</td></tr>
+                <tr><td><code>plan_code</code></td><td>Opsional, harus paket aktif pada ISP ini</td></tr>
+                <tr><td><code>status</code></td><td>active, suspended, atau terminated</td></tr>
+            </tbody></table></div>
+        </article>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Kode paket aktif</h2><p class="muted">Nilai yang dapat dipakai pada kolom plan_code.</p></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Kode</th><th>Paket</th><th>Kecepatan</th></tr></thead><tbody>
+            <?php if ($activePlans === []): ?><tr><td colspan="3" class="muted">Belum ada paket aktif. plan_code harus dikosongkan.</td></tr><?php endif; ?>
+            <?php foreach ($activePlans as $plan): ?><tr><td><strong><?= e($plan['code']) ?></strong></td><td><?= e($plan['name']) ?></td><td><?= e($plan['speed_label']) ?></td></tr><?php endforeach; ?>
+        </tbody></table></div>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
 if ($path === '/customers' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
@@ -977,6 +1194,88 @@ if ($path === '/users') {
     exit;
 }
 
+if ($path === '/reports/export' && $method === 'GET') {
+    Auth::requireReportAccess();
+    $type = query_input('type');
+    if (!in_array($type, ['invoices', 'payments'], true)) {
+        flash('error', 'Jenis export laporan tidak valid.');
+        redirect('/reports');
+    }
+    try {
+        $range = ReportService::normalizeRange(
+            query_input('date_from', date('Y-m-01')),
+            query_input('date_to', date('Y-m-d'))
+        );
+    } catch (InvalidArgumentException $exception) {
+        flash('error', $exception->getMessage());
+        redirect('/reports');
+    }
+
+    $tenantSlug = preg_replace('/[^A-Za-z0-9_-]/', '-', (string) (Auth::user()['tenant_slug'] ?? 'isp')) ?: 'isp';
+    $reportName = $type === 'invoices' ? 'tagihan' : 'kas';
+    $fileName = sprintf(
+        '%s-%s-%s-%s.csv',
+        $reportName,
+        strtolower($tenantSlug),
+        $range['date_from'],
+        $range['date_to']
+    );
+
+    if ($type === 'invoices') {
+        $exportQuery = $db->prepare(
+            "SELECT i.invoice_number, c.customer_code, c.name AS customer_name,
+                    i.period_label, i.base_amount, i.subtotal, i.discount_amount,
+                    i.tax_rate, i.tax_amount, i.penalty_amount, i.amount,
+                    i.due_date, i.status, i.created_at
+             FROM invoices i
+             INNER JOIN customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+             WHERE i.tenant_id = :tenant_id AND i.status IN ('unpaid', 'paid')
+               AND i.created_at >= :date_from AND i.created_at < :date_to
+             ORDER BY i.created_at ASC, i.id ASC"
+        );
+        $headers = [
+            'invoice_number', 'customer_code', 'customer_name', 'period', 'base_amount',
+            'subtotal', 'discount_amount', 'tax_rate', 'tax_amount', 'penalty_amount',
+            'total_amount', 'due_date', 'status', 'created_at',
+        ];
+    } else {
+        $exportQuery = $db->prepare(
+            'SELECT p.paid_at, i.invoice_number, c.customer_code, c.name AS customer_name,
+                    p.amount, p.method, p.reference_number, u.name AS recorded_by
+             FROM payments p
+             INNER JOIN invoices i ON i.id = p.invoice_id AND i.tenant_id = p.tenant_id
+             INNER JOIN customers c ON c.id = i.customer_id AND c.tenant_id = p.tenant_id
+             INNER JOIN users u ON u.id = p.recorded_by
+             WHERE p.tenant_id = :tenant_id AND p.paid_at >= :date_from AND p.paid_at < :date_to
+             ORDER BY p.paid_at ASC, p.id ASC'
+        );
+        $headers = [
+            'paid_at', 'invoice_number', 'customer_code', 'customer_name',
+            'amount', 'method', 'reference_number', 'recorded_by',
+        ];
+    }
+    $exportQuery->execute([
+        'tenant_id' => $tenantId,
+        'date_from' => $range['start_at'],
+        'date_to' => $range['end_before'],
+    ]);
+
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $fileName . '"');
+    header('Cache-Control: no-store');
+    $output = fopen('php://output', 'wb');
+    if ($output === false) {
+        throw new RuntimeException('File export CSV tidak dapat dibuat.');
+    }
+    fwrite($output, "\xEF\xBB\xBF");
+    CsvService::writeRow($output, $headers);
+    while ($row = $exportQuery->fetch()) {
+        CsvService::writeRow($output, array_values($row));
+    }
+    fclose($output);
+    exit;
+}
+
 if ($path === '/reports' && $method === 'GET') {
     Auth::requireReportAccess();
     $dateFrom = query_input('date_from', date('Y-m-01'));
@@ -1103,11 +1402,19 @@ if ($path === '/reports' && $method === 'GET') {
     $receivableQuery->execute(['tenant_id' => $tenantId, 'today' => $today]);
     $receivables = $receivableQuery->fetchAll();
 
+    $exportQueryString = http_build_query([
+        'date_from' => $range['date_from'],
+        'date_to' => $range['date_to'],
+    ]);
     View::header('Laporan keuangan');
     ?>
     <div class="page-heading">
         <div><p class="eyebrow">Kontrol keuangan</p><h1>Laporan piutang dan kas</h1></div>
-        <span class="secure-badge"><?= e($range['date_from']) ?> — <?= e($range['date_to']) ?></span>
+        <div class="action-group">
+            <span class="secure-badge"><?= e($range['date_from']) ?> — <?= e($range['date_to']) ?></span>
+            <a class="button button-secondary" href="/reports/export?type=invoices&amp;<?= e($exportQueryString) ?>">Export tagihan CSV</a>
+            <a class="button button-secondary" href="/reports/export?type=payments&amp;<?= e($exportQueryString) ?>">Export kas CSV</a>
+        </div>
     </div>
     <section class="panel">
         <form method="get" class="report-filter">
@@ -1606,7 +1913,10 @@ if ($path === '/customers') {
     $customers = $customersQuery->fetchAll();
     View::header('Pelanggan');
     ?>
-    <div class="page-heading"><div><p class="eyebrow">Master data</p><h1>Pelanggan</h1></div></div>
+    <div class="page-heading">
+        <div><p class="eyebrow">Master data</p><h1>Pelanggan</h1></div>
+        <?php if (Auth::canManageBilling()): ?><a class="button button-secondary" href="/customers/import">Import CSV</a><?php endif; ?>
+    </div>
     <?php if (Auth::canManageBilling()): ?>
     <section class="panel">
         <h2>Tambah pelanggan</h2>

@@ -21,6 +21,7 @@ Sudah tersedia:
 - kalkulasi pajak, diskon, prorata, serta denda keterlambatan;
 - tampilan invoice siap cetak atau disimpan sebagai PDF dari browser;
 - laporan pendapatan tagihan, kas masuk, aging piutang, dan prioritas penagihan;
+- import pelanggan CSV atomik serta export tagihan dan kas CSV yang aman untuk Excel;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;

@@ -35,7 +35,7 @@ Checklist ini diperbarui setiap kali satu milestone selesai dan telah melewati p
 - [x] prorata dan denda keterlambatan idempotent
 - [x] invoice siap cetak dan disimpan sebagai PDF melalui browser
 - [x] laporan piutang, pendapatan tagihan, kas masuk, aging, dan prioritas penagihan
-- [ ] import pelanggan CSV dan export laporan
+- [x] import pelanggan CSV atomik serta export tagihan dan kas CSV
 - [ ] notifikasi WhatsApp/email dengan antrean
 - [ ] rekonsiliasi pembayaran
 

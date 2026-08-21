@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/app/BillingService.php';
+require_once dirname(__DIR__) . '/app/CsvService.php';
+require_once dirname(__DIR__) . '/app/CustomerImportService.php';
 require_once dirname(__DIR__) . '/app/Pagination.php';
 require_once dirname(__DIR__) . '/app/ReportService.php';
 
@@ -64,6 +66,24 @@ try {
     $invalidRangeRejected = true;
 }
 assert_operational($invalidRangeRejected, 'Rentang laporan terbalik wajib ditolak.');
+
+$csvPath = tempnam(sys_get_temp_dir(), 'rsbilling-csv-');
+assert_operational(is_string($csvPath), 'File sementara CSV wajib dapat dibuat.');
+file_put_contents(
+    $csvPath,
+    "\xEF\xBB\xBFcustomer_code;name;phone;email;address;plan_code;status\n"
+    . "CUST-001;Pelanggan Satu;0812;pelanggan@example.com;Alamat;PAKET-10M;active\n"
+);
+try {
+    $importRows = CustomerImportService::parse($csvPath);
+} finally {
+    unlink($csvPath);
+}
+assert_operational(count($importRows) === 1, 'Parser CSV harus membaca satu pelanggan.');
+assert_operational($importRows[0]['customer_code'] === 'CUST-001', 'BOM dan delimiter CSV harus diproses.');
+assert_operational(CsvService::safeCell('=2+2') === "'=2+2", 'Formula injection CSV wajib dinetralkan.');
+assert_operational(CsvService::safeCell(" \t@SUM(A1:A2)") === "' \t@SUM(A1:A2)", 'Formula tersamar wajib dinetralkan.');
+assert_operational(CsvService::safeCell('Pelanggan Aman') === 'Pelanggan Aman', 'Sel CSV normal tidak boleh berubah.');
 
 $pagination = new Pagination(45, 3, 20);
 assert_operational($pagination->page === 3, 'Halaman aktif tidak sesuai.');
@@ -135,6 +155,14 @@ assert_operational(
         && str_contains($routes, 'FROM payments')
         && str_contains($routes, 'WHERE tenant_id = :tenant_id AND paid_at >= :date_from'),
     'Laporan keuangan wajib tersedia, terlindungi role, dan dibatasi tenant aktif.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/customers/import' && \$method === 'POST')")
+        && str_contains($routes, 'is_uploaded_file')
+        && str_contains($routes, "audit_event(\$db, 'customer.csv_imported'")
+        && str_contains($routes, "if (\$path === '/reports/export' && \$method === 'GET')")
+        && str_contains($routes, 'CsvService::writeRow'),
+    'Import pelanggan dan export laporan CSV wajib tersedia serta diaudit.'
 );
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");

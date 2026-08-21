@@ -43,6 +43,12 @@ expect(
         && str_contains($auth, 'public static function requireReportAccess()'),
     'Laporan keuangan wajib memiliki kontrol akses role tersendiri.'
 );
+expect(
+    str_contains($routes, "Auth::requireBillingAccess();\n    verify_csrf();\n    \$upload = \$_FILES['csv_file']")
+        && str_contains($routes, "WHERE tenant_id = :tenant_id AND customer_code IN")
+        && str_contains($routes, "WHERE p.tenant_id = :tenant_id AND p.paid_at >= :date_from"),
+    'Import dan export CSV wajib terlindungi CSRF serta isolasi tenant.'
+);
 
 $paths = [dirname(__DIR__) . '/app', dirname(__DIR__) . '/public', dirname(__DIR__) . '/database'];
 foreach ($paths as $path) {
