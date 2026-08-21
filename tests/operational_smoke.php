@@ -1,0 +1,425 @@
+<?php
+
+declare(strict_types=1);
+
+require_once dirname(__DIR__) . '/app/BillingService.php';
+require_once dirname(__DIR__) . '/app/CsvService.php';
+require_once dirname(__DIR__) . '/app/CustomerImportService.php';
+require_once dirname(__DIR__) . '/app/CredentialVault.php';
+require_once dirname(__DIR__) . '/app/NetworkCommandService.php';
+require_once dirname(__DIR__) . '/app/NetworkDeviceService.php';
+require_once dirname(__DIR__) . '/app/NetworkDeviceSimulator.php';
+require_once dirname(__DIR__) . '/app/NetworkWorkerMonitor.php';
+require_once dirname(__DIR__) . '/app/NotificationService.php';
+require_once dirname(__DIR__) . '/app/PaymentReconciliationService.php';
+require_once dirname(__DIR__) . '/app/Pagination.php';
+require_once dirname(__DIR__) . '/app/ReportService.php';
+
+function assert_operational(bool $condition, string $message): void
+{
+    if (!$condition) {
+        fwrite(STDERR, "GAGAL: {$message}\n");
+        exit(1);
+    }
+}
+
+assert_operational(BillingService::periodStart('2026-08') === '2026-08-01', 'Periode bulanan harus dinormalisasi.');
+assert_operational(BillingService::periodStart('2026-13') === null, 'Bulan tidak valid wajib ditolak.');
+assert_operational(BillingService::monthLabel('2026-08') === 'Agustus 2026', 'Label bulan Indonesia harus konsisten.');
+assert_operational(
+    BillingService::invoiceNumber('2026-08', 42, 'CUST-001') === 'INV-202608-42-CUST-001',
+    'Nomor invoice bulanan harus deterministik.'
+);
+assert_operational(BillingService::daysInMonth('2028-02') === 29, 'Jumlah hari periode harus mendukung tahun kabisat.');
+
+$totals = BillingService::calculateTotals(100000, 11, 10000);
+assert_operational($totals['subtotal'] === 100000.0, 'Subtotal penuh tidak sesuai.');
+assert_operational($totals['tax_amount'] === 9900.0, 'Pajak setelah diskon tidak sesuai.');
+assert_operational($totals['amount'] === 99900.0, 'Total setelah diskon dan pajak tidak sesuai.');
+
+$prorated = BillingService::calculateTotals(100000, 0, 0, 15, 30);
+assert_operational($prorated['subtotal'] === 50000.0, 'Perhitungan prorata tidak sesuai.');
+assert_operational(
+    BillingService::totalWithPenalty(50000, 0, 0, 5000) === 55000.0,
+    'Penetapan denda absolut tidak sesuai.'
+);
+
+$vault = CredentialVault::fromBase64('base64:' . base64_encode(str_repeat('K', 32)));
+$vaultAad = 'rsbilling|network-device|v1|7|0123456789abcdef0123456789abcdef';
+$vaultCredentials = ['username' => 'router-admin', 'password' => 'Kunci-Router-Uji-2026!'];
+$vaultPayload = $vault->encrypt($vaultCredentials, $vaultAad);
+assert_operational(
+    !str_contains($vaultPayload, $vaultCredentials['username'])
+        && !str_contains($vaultPayload, $vaultCredentials['password']),
+    'Ciphertext credential vault tidak boleh memuat username atau password plaintext.'
+);
+assert_operational(
+    $vault->decrypt($vaultPayload, $vaultAad) === $vaultCredentials,
+    'Credential vault wajib membuka kembali payload hanya dengan key dan AAD yang benar.'
+);
+$vaultRejectedWrongContext = false;
+try {
+    $vault->decrypt($vaultPayload, $vaultAad . '|tenant-lain');
+} catch (RuntimeException) {
+    $vaultRejectedWrongContext = true;
+}
+assert_operational($vaultRejectedWrongContext, 'Credential vault wajib menolak AAD tenant/perangkat yang berbeda.');
+$tamperedVaultData = json_decode($vaultPayload, true, 8, JSON_THROW_ON_ERROR);
+$tamperedVaultData['c'][0] = $tamperedVaultData['c'][0] === 'A' ? 'B' : 'A';
+$tamperedVaultPayload = json_encode($tamperedVaultData, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+$vaultRejectedTampering = false;
+try {
+    $vault->decrypt($tamperedVaultPayload, $vaultAad);
+} catch (RuntimeException) {
+    $vaultRejectedTampering = true;
+}
+assert_operational($vaultRejectedTampering, 'Credential vault wajib menolak ciphertext yang diubah.');
+
+$deviceConfiguration = NetworkDeviceService::validateConfiguration([
+    'name' => 'Router Simulator Uji',
+    'driver' => 'simulator',
+    'host' => 'SIMULATOR.INTERNAL.',
+    'port' => '8729',
+    'use_tls' => true,
+]);
+assert_operational(
+    $deviceConfiguration['host'] === 'simulator.internal' && $deviceConfiguration['port'] === 8729,
+    'Konfigurasi perangkat wajib divalidasi dan dinormalisasi.'
+);
+$simulatorResult = NetworkDeviceSimulator::probe([
+    'driver' => 'simulator',
+    'device_key' => '0123456789abcdef0123456789abcdef',
+    'use_tls' => 1,
+], $vaultCredentials);
+assert_operational(
+    $simulatorResult['status'] === 'success'
+        && in_array('suspend_preview', $simulatorResult['capabilities'], true),
+    'Simulator wajib menyediakan probe dan preview capability tanpa perangkat nyata.'
+);
+assert_operational(
+    !str_contains(json_encode($simulatorResult, JSON_THROW_ON_ERROR), $vaultCredentials['password']),
+    'Hasil simulator tidak boleh membocorkan credential vault.'
+);
+$commandResult = NetworkDeviceSimulator::executeCommand([
+    'driver' => 'simulator',
+    'device_key' => '0123456789abcdef0123456789abcdef',
+    'use_tls' => 1,
+], $vaultCredentials, 'suspend_preview', 'CUST-001');
+assert_operational(
+    $commandResult['status'] === 'success'
+        && $commandResult['action'] === 'suspend_preview'
+        && $commandResult['target_reference'] === 'CUST-001'
+        && $commandResult['changed_network'] === false,
+    'Worker simulator wajib menghasilkan preview tanpa perubahan jaringan.'
+);
+assert_operational(
+    !str_contains(json_encode($commandResult, JSON_THROW_ON_ERROR), $vaultCredentials['password']),
+    'Hasil perintah simulator tidak boleh membocorkan credential vault.'
+);
+assert_operational(
+    NetworkCommandService::retryDelaySeconds(1) === 30
+        && NetworkCommandService::retryDelaySeconds(2) === 60
+        && NetworkCommandService::retryDelaySeconds(10) === 900,
+    'Retry perintah wajib eksponensial dan dibatasi maksimal 15 menit.'
+);
+assert_operational(
+    NetworkCommandService::validateTarget('health_check', '') === ''
+        && NetworkCommandService::validateTarget('provision_preview', 'CUST-001') === 'CUST-001',
+    'Target perintah wajib divalidasi sesuai jenis aksi.'
+);
+$workerKey = NetworkWorkerMonitor::keyForIdentity('primary');
+assert_operational(
+    preg_match('/^[a-f0-9]{64}$/', $workerKey) === 1
+        && $workerKey === NetworkWorkerMonitor::keyForIdentity('primary')
+        && $workerKey !== NetworkWorkerMonitor::keyForIdentity('secondary'),
+    'Identitas worker wajib diubah menjadi kunci heartbeat deterministik tanpa mengekspos hostname.'
+);
+
+$invalidDiscountRejected = false;
+try {
+    BillingService::calculateTotals(50000, 0, 51000);
+} catch (InvalidArgumentException) {
+    $invalidDiscountRejected = true;
+}
+assert_operational($invalidDiscountRejected, 'Diskon di atas subtotal wajib ditolak.');
+
+$invalidProrationRejected = false;
+try {
+    BillingService::calculateTotals(50000, 0, 0, 31, 30);
+} catch (InvalidArgumentException) {
+    $invalidProrationRejected = true;
+}
+assert_operational($invalidProrationRejected, 'Hari prorata di luar periode wajib ditolak.');
+
+$range = ReportService::normalizeRange('2026-08-01', '2026-08-31');
+assert_operational($range['inclusive_days'] === 31, 'Jumlah hari laporan tidak sesuai.');
+assert_operational($range['end_before'] === '2026-09-01 00:00:00', 'Batas eksklusif laporan tidak sesuai.');
+$agingBoundaries = ReportService::agingBoundaries('2026-08-21');
+assert_operational($agingBoundaries['day_30'] === '2026-07-22', 'Batas aging 30 hari tidak sesuai.');
+
+$invalidRangeRejected = false;
+try {
+    ReportService::normalizeRange('2026-08-31', '2026-08-01');
+} catch (InvalidArgumentException) {
+    $invalidRangeRejected = true;
+}
+assert_operational($invalidRangeRejected, 'Rentang laporan terbalik wajib ditolak.');
+
+$csvPath = tempnam(sys_get_temp_dir(), 'rsbilling-csv-');
+assert_operational(is_string($csvPath), 'File sementara CSV wajib dapat dibuat.');
+file_put_contents(
+    $csvPath,
+    "\xEF\xBB\xBFcustomer_code;name;phone;email;address;plan_code;status\n"
+    . "CUST-001;Pelanggan Satu;0812;pelanggan@example.com;Alamat;PAKET-10M;active\n"
+);
+try {
+    $importRows = CustomerImportService::parse($csvPath);
+} finally {
+    unlink($csvPath);
+}
+assert_operational(count($importRows) === 1, 'Parser CSV harus membaca satu pelanggan.');
+assert_operational($importRows[0]['customer_code'] === 'CUST-001', 'BOM dan delimiter CSV harus diproses.');
+assert_operational(CsvService::safeCell('=2+2') === "'=2+2", 'Formula injection CSV wajib dinetralkan.');
+assert_operational(CsvService::safeCell(" \t@SUM(A1:A2)") === "' \t@SUM(A1:A2)", 'Formula tersamar wajib dinetralkan.');
+assert_operational(CsvService::safeCell('Pelanggan Aman') === 'Pelanggan Aman', 'Sel CSV normal tidak boleh berubah.');
+
+assert_operational(
+    NotificationService::normalizeRecipient('whatsapp', '0812-3456-7890') === '6281234567890',
+    'Nomor WhatsApp lokal harus dinormalisasi ke format internasional.'
+);
+assert_operational(
+    NotificationService::normalizeRecipient('email', ' Billing@Example.COM ') === 'billing@example.com',
+    'Email tujuan harus divalidasi dan dinormalisasi.'
+);
+$notificationContent = NotificationService::composeInvoice([
+    'tenant_name' => 'ISP Uji',
+    'customer_name' => 'Pelanggan Uji',
+    'invoice_number' => 'INV-TEST-001',
+    'period_label' => 'Agustus 2099',
+    'amount' => '150000.00',
+    'due_date' => '2099-08-20',
+], 'whatsapp');
+assert_operational($notificationContent['template'] === 'invoice_reminder', 'Template pengingat invoice tidak sesuai.');
+assert_operational(
+    str_contains($notificationContent['message'], 'INV-TEST-001')
+        && str_contains($notificationContent['message'], 'Rp150.000'),
+    'Isi pesan invoice wajib memuat nomor dan total tagihan.'
+);
+
+$reconciliationPath = tempnam(sys_get_temp_dir(), 'rsbilling-reconciliation-');
+assert_operational(is_string($reconciliationPath), 'File sementara rekonsiliasi wajib dapat dibuat.');
+file_put_contents(
+    $reconciliationPath,
+    "\xEF\xBB\xBFexternal_reference;invoice_number;amount;paid_at;method;payer_name\n"
+    . "TRX-001;INV-TEST-001;150000,00;2026-08-20;bank_transfer;Pelanggan Uji\n"
+);
+try {
+    $reconciliationRows = PaymentReconciliationService::parseCsv($reconciliationPath);
+} finally {
+    unlink($reconciliationPath);
+}
+assert_operational(count($reconciliationRows) === 1, 'Parser rekonsiliasi harus membaca satu transaksi.');
+assert_operational($reconciliationRows[0]['amount'] === '150000.00', 'Nominal rekonsiliasi harus dinormalisasi.');
+assert_operational(
+    $reconciliationRows[0]['paid_at'] === '2026-08-20 00:00:00',
+    'Tanggal rekonsiliasi harus dinormalisasi.'
+);
+$exactMatch = PaymentReconciliationService::classifyInvoice([
+    'id' => 7,
+    'amount' => '150000.00',
+    'status' => 'unpaid',
+], '150000.00');
+assert_operational(
+    $exactMatch['match_status'] === 'matched' && $exactMatch['invoice_id'] === 7,
+    'Invoice dan nominal yang sama wajib berstatus matched.'
+);
+$amountMismatch = PaymentReconciliationService::classifyInvoice([
+    'id' => 7,
+    'amount' => '160000.00',
+    'status' => 'unpaid',
+], '150000.00');
+assert_operational($amountMismatch['match_reason'] === 'amount_mismatch', 'Nominal berbeda wajib ditolak exact-match.');
+
+$pagination = new Pagination(45, 3, 20);
+assert_operational($pagination->page === 3, 'Halaman aktif tidak sesuai.');
+assert_operational($pagination->offset() === 40, 'Offset pagination tidak sesuai.');
+assert_operational($pagination->from() === 41 && $pagination->to() === 45, 'Rentang pagination tidak sesuai.');
+
+$schema = file_get_contents(dirname(__DIR__) . '/database/schema.sql') ?: '';
+$installer = file_get_contents(dirname(__DIR__) . '/database/install.php') ?: '';
+$routes = file_get_contents(dirname(__DIR__) . '/public/index.php') ?: '';
+$networkDeviceSource = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceService.php') ?: '';
+$envExample = file_get_contents(dirname(__DIR__) . '/.env.example') ?: '';
+$compose = file_get_contents(dirname(__DIR__) . '/compose.yaml') ?: '';
+$dockerfile = file_get_contents(dirname(__DIR__) . '/docker/php/Dockerfile') ?: '';
+$entrypoint = file_get_contents(dirname(__DIR__) . '/docker/php/entrypoint.sh') ?: '';
+$networkWorkerDaemon = file_get_contents(dirname(__DIR__) . '/scripts/network_worker_daemon.php') ?: '';
+$networkWorkerHealth = file_get_contents(dirname(__DIR__) . '/scripts/network_worker_health.php') ?: '';
+$workerComposeMatched = preg_match('/  network-worker:\n(?<block>.*?)(?=\nvolumes:)/s', $compose, $workerComposeMatch) === 1;
+$workerCompose = $workerComposeMatched ? $workerComposeMatch['block'] : '';
+assert_operational(
+    str_contains($envExample, 'APP_TIMEZONE=Asia/Jakarta')
+        && str_contains($envExample, 'NETWORK_WORKER_POLL_SECONDS=5'),
+    'Zona waktu dan interval worker harus memiliki default eksplisit.'
+);
+assert_operational(
+    str_contains($schema, 'invoices_tenant_customer_period_unique'),
+    'Unique key invoice per tenant, pelanggan, dan periode wajib tersedia.'
+);
+assert_operational(
+    str_contains($schema, 'base_amount DECIMAL(15,2)')
+        && str_contains($schema, 'discount_amount DECIMAL(15,2)')
+        && str_contains($schema, 'penalty_amount DECIMAL(15,2)'),
+    'Komponen perhitungan invoice wajib disimpan terpisah.'
+);
+assert_operational(
+    str_contains($schema, 'invoices_tenant_created_idx (tenant_id, created_at)'),
+    'Index periode laporan invoice wajib tersedia.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS notification_outbox')
+        && str_contains($schema, 'notification_outbox_tenant_idempotency_unique (tenant_id, idempotency_key)')
+        && str_contains($schema, 'notification_outbox_tenant_queue_idx (tenant_id, status, available_at)'),
+    'Outbox notifikasi wajib memiliki isolasi tenant, idempotensi, dan index antrean.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS payment_reconciliations')
+        && str_contains($schema, 'payment_reconciliations_tenant_method_reference_unique')
+        && str_contains($schema, 'payment_reconciliations_tenant_status_idx (tenant_id, match_status, created_at)'),
+    'Staging rekonsiliasi wajib memiliki isolasi tenant, referensi unik, dan index status.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS network_devices')
+        && str_contains($schema, 'credential_ciphertext TEXT NOT NULL')
+        && str_contains($schema, 'network_devices_tenant_name_unique (tenant_id, name)')
+        && str_contains($schema, 'network_devices_tenant_status_idx (tenant_id, status)'),
+    'Perangkat jaringan wajib memiliki credential ciphertext, isolasi tenant, dan index operasional.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS network_commands')
+        && str_contains($schema, 'network_commands_tenant_idempotency_unique (tenant_id, idempotency_key)')
+        && str_contains($schema, 'network_commands_tenant_queue_idx (tenant_id, status, available_at)')
+        && str_contains($schema, "'retry_scheduled', 'dead_letter'")
+        && str_contains($schema, 'result_payload TEXT NULL'),
+    'Command queue wajib memiliki isolasi tenant, idempotensi, index worker, retry, dan dead-letter.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS network_worker_heartbeats')
+        && str_contains($schema, "status ENUM('starting', 'running', 'stopping', 'stopped', 'failed')")
+        && str_contains($schema, 'network_worker_heartbeats_status_seen_idx (status, last_seen_at)'),
+    'Heartbeat worker wajib memiliki status lifecycle dan index monitoring.'
+);
+assert_operational(
+    $workerComposeMatched
+        && str_contains($workerCompose, 'RSBILLING_SKIP_INSTALL: "1"')
+        && str_contains($workerCompose, 'read_only: true')
+        && str_contains($workerCompose, 'stop_grace_period: 20s')
+        && str_contains($workerCompose, 'network_worker_health.php')
+        && !str_contains($workerCompose, "\n    ports:")
+        && str_contains($dockerfile, 'docker-php-ext-install pdo_mysql pcntl')
+        && str_contains($entrypoint, 'RSBILLING_SKIP_INSTALL')
+        && str_contains($networkWorkerDaemon, 'pcntl_signal(SIGTERM')
+        && str_contains($networkWorkerDaemon, 'NetworkWorkerMonitor::beat(')
+        && str_contains($networkWorkerHealth, 'NetworkWorkerMonitor::isHealthy('),
+    'Worker permanen wajib tanpa port publik, memiliki heartbeat, healthcheck, PCNTL, dan graceful shutdown.'
+);
+assert_operational(
+    str_contains($installer, "if (!\$columnExists(\$db, 'invoices', 'base_amount'))")
+        && str_contains($installer, 'UPDATE invoices SET base_amount = amount, subtotal = amount'),
+    'Migrasi komponen invoice wajib idempotent dan mem-backfill invoice lama.'
+);
+assert_operational(
+    str_contains($routes, "BillingService::generateMonthly(\$db, \$tenantId"),
+    'Route generator bulanan wajib menggunakan BillingService.'
+);
+assert_operational(
+    str_contains($routes, "WHERE id = :id AND tenant_id = :tenant_id"),
+    'Update master data wajib dibatasi tenant aktif.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/customers/view')")
+        && str_contains($routes, "if (\$path === '/invoices/view')"),
+    'Halaman detail pelanggan dan invoice wajib tersedia.'
+);
+assert_operational(
+    str_contains($routes, "audit_event(\$db, 'customer.archived'")
+        && str_contains($routes, "audit_event(\$db, 'plan.archived'"),
+    'Arsip pelanggan dan paket wajib masuk audit log.'
+);
+assert_operational(
+    !str_contains($routes, 'DELETE FROM customers') && !str_contains($routes, 'DELETE FROM plans'),
+    'Master data tidak boleh dihapus permanen melalui route operasional.'
+);
+assert_operational(
+    str_contains($routes, 'p.invoice_id = :invoice_id AND p.tenant_id = :tenant_id'),
+    'Histori pembayaran wajib dibatasi invoice dan tenant aktif.'
+);
+assert_operational(
+    str_contains($routes, "audit_event(\$db, 'invoice.penalty_updated'")
+        && str_contains($routes, "if (\$path === '/invoices/print')"),
+    'Denda dan tampilan cetak invoice wajib tersedia.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/reports' && \$method === 'GET')")
+        && str_contains($routes, 'Auth::requireReportAccess()')
+        && str_contains($routes, "FROM invoices WHERE tenant_id = :tenant_id AND status = 'unpaid'")
+        && str_contains($routes, 'FROM payments')
+        && str_contains($routes, 'WHERE tenant_id = :tenant_id AND paid_at >= :date_from'),
+    'Laporan keuangan wajib tersedia, terlindungi role, dan dibatasi tenant aktif.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/customers/import' && \$method === 'POST')")
+        && str_contains($routes, 'is_uploaded_file')
+        && str_contains($routes, "audit_event(\$db, 'customer.csv_imported'")
+        && str_contains($routes, "if (\$path === '/reports/export' && \$method === 'GET')")
+        && str_contains($routes, 'CsvService::writeRow'),
+    'Import pelanggan dan export laporan CSV wajib tersedia serta diaudit.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/notifications' && \$method === 'POST')")
+        && str_contains($routes, 'NotificationService::enqueueInvoice(')
+        && str_contains($routes, 'NotificationService::cancelInvoiceNotifications(')
+        && str_contains($routes, "audit_event(\$db, 'notification.queued'")
+        && str_contains($routes, "if (\$path === '/notifications' && \$method === 'GET')"),
+    'Antrean notifikasi wajib memiliki enqueue, audit, dan halaman operasional.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/reconciliation/import' && \$method === 'POST')")
+        && str_contains($routes, 'PaymentReconciliationService::prepareRows(')
+        && str_contains($routes, 'PaymentReconciliationService::post(')
+        && str_contains($routes, 'PaymentReconciliationService::invalidateInvoiceMatches(')
+        && str_contains($routes, "audit_event(\$db, 'payment.reconciled'")
+        && str_contains($routes, "if (\$path === '/reconciliation' && \$method === 'GET')"),
+    'Rekonsiliasi wajib memiliki import, exact-match, posting, audit, dan UI.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/network-devices' && \$method === 'POST')")
+        && str_contains($routes, 'NetworkDeviceService::create(')
+        && str_contains($routes, 'NetworkDeviceService::testSimulator(')
+        && str_contains($routes, "audit_event(\$db, 'network_device.created'")
+        && str_contains($routes, "if (\$path === '/network-devices' && \$method === 'GET')"),
+    'Perangkat jaringan wajib memiliki vault, simulator, audit, dan UI operasional.'
+);
+assert_operational(
+    str_contains($networkDeviceSource, "last_error = 'Perintah dibatalkan karena kredensial perangkat dirotasi.'")
+        && str_contains($networkDeviceSource, "last_error = 'Perintah dibatalkan karena perangkat dinonaktifkan.'"),
+    'Rotasi credential dan penonaktifan perangkat wajib membatalkan perintah tertunda.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/network-commands' && \$method === 'POST')")
+        && str_contains($routes, 'NetworkCommandService::enqueue(')
+        && str_contains($routes, 'NetworkCommandService::processDue(')
+        && str_contains($routes, "audit_event(\$db, 'network_command.worker_run'")
+        && str_contains($routes, 'Antrean perintah simulator')
+        && str_contains($routes, 'Riwayat perintah'),
+    'Command queue wajib memiliki enqueue, worker simulator, audit, dan UI operasional.'
+);
+assert_operational(
+    str_contains($routes, 'NetworkWorkerMonitor::recent($db, 5)')
+        && str_contains($routes, 'Worker otomatis sehat')
+        && str_contains($routes, 'Worker otomatis belum terdeteksi')
+        && str_contains($routes, 'Proses manual maksimal 10'),
+    'UI perangkat wajib menampilkan heartbeat worker dan menyediakan proses manual sebagai fallback.'
+);
+
+fwrite(STDOUT, "Operational smoke test lulus.\n");
