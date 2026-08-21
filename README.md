@@ -20,6 +20,7 @@ Sudah tersedia:
 - arsip aman pelanggan/paket tanpa menghapus histori transaksi;
 - kalkulasi pajak, diskon, prorata, serta denda keterlambatan;
 - tampilan invoice siap cetak atau disimpan sebagai PDF dari browser;
+- laporan pendapatan tagihan, kas masuk, aging piutang, dan prioritas penagihan;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;

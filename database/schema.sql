@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     UNIQUE KEY invoices_tenant_number_unique (tenant_id, invoice_number),
     UNIQUE KEY invoices_tenant_customer_period_unique (tenant_id, customer_id, billing_period),
     KEY invoices_tenant_status_due_idx (tenant_id, status, due_date),
+    KEY invoices_tenant_created_idx (tenant_id, created_at),
     KEY invoices_customer_idx (customer_id),
     CONSTRAINT invoices_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
     CONSTRAINT invoices_customer_fk FOREIGN KEY (customer_id) REFERENCES customers (id) ON DELETE RESTRICT

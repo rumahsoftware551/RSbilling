@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/app/BillingService.php';
 require_once dirname(__DIR__) . '/app/Pagination.php';
+require_once dirname(__DIR__) . '/app/ReportService.php';
 
 function assert_operational(bool $condition, string $message): void
 {
@@ -50,6 +51,20 @@ try {
 }
 assert_operational($invalidProrationRejected, 'Hari prorata di luar periode wajib ditolak.');
 
+$range = ReportService::normalizeRange('2026-08-01', '2026-08-31');
+assert_operational($range['inclusive_days'] === 31, 'Jumlah hari laporan tidak sesuai.');
+assert_operational($range['end_before'] === '2026-09-01 00:00:00', 'Batas eksklusif laporan tidak sesuai.');
+$agingBoundaries = ReportService::agingBoundaries('2026-08-21');
+assert_operational($agingBoundaries['day_30'] === '2026-07-22', 'Batas aging 30 hari tidak sesuai.');
+
+$invalidRangeRejected = false;
+try {
+    ReportService::normalizeRange('2026-08-31', '2026-08-01');
+} catch (InvalidArgumentException) {
+    $invalidRangeRejected = true;
+}
+assert_operational($invalidRangeRejected, 'Rentang laporan terbalik wajib ditolak.');
+
 $pagination = new Pagination(45, 3, 20);
 assert_operational($pagination->page === 3, 'Halaman aktif tidak sesuai.');
 assert_operational($pagination->offset() === 40, 'Offset pagination tidak sesuai.');
@@ -72,6 +87,10 @@ assert_operational(
         && str_contains($schema, 'discount_amount DECIMAL(15,2)')
         && str_contains($schema, 'penalty_amount DECIMAL(15,2)'),
     'Komponen perhitungan invoice wajib disimpan terpisah.'
+);
+assert_operational(
+    str_contains($schema, 'invoices_tenant_created_idx (tenant_id, created_at)'),
+    'Index periode laporan invoice wajib tersedia.'
 );
 assert_operational(
     str_contains($installer, "if (!\$columnExists(\$db, 'invoices', 'base_amount'))")
@@ -108,6 +127,14 @@ assert_operational(
     str_contains($routes, "audit_event(\$db, 'invoice.penalty_updated'")
         && str_contains($routes, "if (\$path === '/invoices/print')"),
     'Denda dan tampilan cetak invoice wajib tersedia.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/reports' && \$method === 'GET')")
+        && str_contains($routes, 'Auth::requireReportAccess()')
+        && str_contains($routes, "FROM invoices WHERE tenant_id = :tenant_id AND status = 'unpaid'")
+        && str_contains($routes, 'FROM payments')
+        && str_contains($routes, 'WHERE tenant_id = :tenant_id AND paid_at >= :date_from'),
+    'Laporan keuangan wajib tersedia, terlindungi role, dan dibatasi tenant aktif.'
 );
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");

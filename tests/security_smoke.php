@@ -38,6 +38,11 @@ expect(!PasswordPolicy::isAcceptable('Admin@12345'), 'Password contoh wajib dito
 expect(!PasswordPolicy::isAcceptable('pendek123'), 'Password pendek wajib ditolak.');
 expect(str_contains($routes, "WHERE tu.tenant_id = :tenant_id AND tu.user_id = :user_id"), 'Perubahan role wajib dibatasi tenant aktif.');
 expect(str_contains($routes, "audit_event(\$db, 'account.password_changed'"), 'Perubahan password wajib diaudit.');
+expect(
+    str_contains($auth, "['owner', 'admin', 'billing', 'viewer']")
+        && str_contains($auth, 'public static function requireReportAccess()'),
+    'Laporan keuangan wajib memiliki kontrol akses role tersendiri.'
+);
 
 $paths = [dirname(__DIR__) . '/app', dirname(__DIR__) . '/public', dirname(__DIR__) . '/database'];
 foreach ($paths as $path) {

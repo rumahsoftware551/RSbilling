@@ -27,6 +27,7 @@ final class View
             <a href="/customers">Pelanggan</a>
             <a href="/plans">Paket</a>
             <a href="/invoices">Tagihan</a>
+            <?php if (Auth::canViewReports()): ?><a href="/reports">Laporan</a><?php endif; ?>
             <?php if (Auth::canManageUsers()): ?><a href="/users">Pengguna</a><?php endif; ?>
             <a href="/account">Akun Saya</a>
         </nav>

@@ -977,6 +977,211 @@ if ($path === '/users') {
     exit;
 }
 
+if ($path === '/reports' && $method === 'GET') {
+    Auth::requireReportAccess();
+    $dateFrom = query_input('date_from', date('Y-m-01'));
+    $dateTo = query_input('date_to', date('Y-m-d'));
+    try {
+        $range = ReportService::normalizeRange($dateFrom, $dateTo);
+    } catch (InvalidArgumentException $exception) {
+        flash('error', $exception->getMessage());
+        redirect('/reports');
+    }
+
+    $today = date('Y-m-d');
+    $agingBoundaries = ReportService::agingBoundaries($today);
+
+    $issuedQuery = $db->prepare(
+        "SELECT COUNT(*) AS invoice_count,
+                COALESCE(SUM(base_amount), 0) AS base_total,
+                COALESCE(SUM(discount_amount), 0) AS discount_total,
+                COALESCE(SUM(tax_amount), 0) AS tax_total,
+                COALESCE(SUM(penalty_amount), 0) AS penalty_total,
+                COALESCE(SUM(amount), 0) AS billed_total
+         FROM invoices
+         WHERE tenant_id = :tenant_id AND status IN ('unpaid', 'paid')
+           AND created_at >= :date_from AND created_at < :date_to"
+    );
+    $issuedQuery->execute([
+        'tenant_id' => $tenantId,
+        'date_from' => $range['start_at'],
+        'date_to' => $range['end_before'],
+    ]);
+    $issued = $issuedQuery->fetch() ?: [];
+
+    $cashSummaryQuery = $db->prepare(
+        'SELECT COUNT(*) AS payment_count, COALESCE(SUM(amount), 0) AS cash_total
+         FROM payments
+         WHERE tenant_id = :tenant_id AND paid_at >= :date_from AND paid_at < :date_to'
+    );
+    $cashSummaryQuery->execute([
+        'tenant_id' => $tenantId,
+        'date_from' => $range['start_at'],
+        'date_to' => $range['end_before'],
+    ]);
+    $cashSummary = $cashSummaryQuery->fetch() ?: [];
+
+    $outstandingQuery = $db->prepare(
+        "SELECT COUNT(*) AS invoice_count,
+                COALESCE(SUM(amount), 0) AS outstanding_total,
+                COUNT(CASE WHEN due_date < :overdue_count_today THEN 1 END) AS overdue_count,
+                COALESCE(SUM(CASE WHEN due_date < :overdue_amount_today THEN amount ELSE 0 END), 0) AS overdue_total
+         FROM invoices WHERE tenant_id = :tenant_id AND status = 'unpaid'"
+    );
+    $outstandingQuery->execute([
+        'overdue_count_today' => $today,
+        'overdue_amount_today' => $today,
+        'tenant_id' => $tenantId,
+    ]);
+    $outstanding = $outstandingQuery->fetch() ?: [];
+
+    $agingQuery = $db->prepare(
+        "SELECT
+            COALESCE(SUM(CASE WHEN due_date >= :current_today THEN amount ELSE 0 END), 0) AS current_total,
+            COALESCE(SUM(CASE WHEN due_date < :late_today AND due_date >= :late_day_30 THEN amount ELSE 0 END), 0) AS day_1_30_total,
+            COALESCE(SUM(CASE WHEN due_date < :day_31_before AND due_date >= :late_day_60 THEN amount ELSE 0 END), 0) AS day_31_60_total,
+            COALESCE(SUM(CASE WHEN due_date < :day_61_before AND due_date >= :late_day_90 THEN amount ELSE 0 END), 0) AS day_61_90_total,
+            COALESCE(SUM(CASE WHEN due_date < :day_90_before THEN amount ELSE 0 END), 0) AS over_90_total
+         FROM invoices WHERE tenant_id = :tenant_id AND status = 'unpaid'"
+    );
+    $agingQuery->execute([
+        'current_today' => $agingBoundaries['today'],
+        'late_today' => $agingBoundaries['today'],
+        'late_day_30' => $agingBoundaries['day_30'],
+        'day_31_before' => $agingBoundaries['day_30'],
+        'late_day_60' => $agingBoundaries['day_60'],
+        'day_61_before' => $agingBoundaries['day_60'],
+        'late_day_90' => $agingBoundaries['day_90'],
+        'day_90_before' => $agingBoundaries['day_90'],
+        'tenant_id' => $tenantId,
+    ]);
+    $aging = $agingQuery->fetch() ?: [];
+    $agingRows = [
+        ['label' => 'Belum jatuh tempo', 'total' => $aging['current_total'] ?? 0],
+        ['label' => 'Terlambat 1–30 hari', 'total' => $aging['day_1_30_total'] ?? 0],
+        ['label' => 'Terlambat 31–60 hari', 'total' => $aging['day_31_60_total'] ?? 0],
+        ['label' => 'Terlambat 61–90 hari', 'total' => $aging['day_61_90_total'] ?? 0],
+        ['label' => 'Terlambat lebih dari 90 hari', 'total' => $aging['over_90_total'] ?? 0],
+    ];
+
+    $cashMethodQuery = $db->prepare(
+        'SELECT method, COUNT(*) AS payment_count, COALESCE(SUM(amount), 0) AS cash_total
+         FROM payments
+         WHERE tenant_id = :tenant_id AND paid_at >= :date_from AND paid_at < :date_to
+         GROUP BY method ORDER BY cash_total DESC, method ASC'
+    );
+    $cashMethodQuery->execute([
+        'tenant_id' => $tenantId,
+        'date_from' => $range['start_at'],
+        'date_to' => $range['end_before'],
+    ]);
+    $cashMethods = $cashMethodQuery->fetchAll();
+
+    $dailyCashQuery = $db->prepare(
+        'SELECT DATE(paid_at) AS report_date, COUNT(*) AS payment_count,
+                COALESCE(SUM(amount), 0) AS cash_total
+         FROM payments
+         WHERE tenant_id = :tenant_id AND paid_at >= :date_from AND paid_at < :date_to
+         GROUP BY DATE(paid_at) ORDER BY report_date DESC'
+    );
+    $dailyCashQuery->execute([
+        'tenant_id' => $tenantId,
+        'date_from' => $range['start_at'],
+        'date_to' => $range['end_before'],
+    ]);
+    $dailyCash = $dailyCashQuery->fetchAll();
+
+    $receivableQuery = $db->prepare(
+        "SELECT i.id, i.invoice_number, i.due_date, i.amount,
+                c.customer_code, c.name AS customer_name
+         FROM invoices i
+         INNER JOIN customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+         WHERE i.tenant_id = :tenant_id AND i.status = 'unpaid'
+         ORDER BY CASE WHEN i.due_date < :today THEN 0 ELSE 1 END, i.due_date ASC, i.id DESC
+         LIMIT 20"
+    );
+    $receivableQuery->execute(['tenant_id' => $tenantId, 'today' => $today]);
+    $receivables = $receivableQuery->fetchAll();
+
+    View::header('Laporan keuangan');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Kontrol keuangan</p><h1>Laporan piutang dan kas</h1></div>
+        <span class="secure-badge"><?= e($range['date_from']) ?> — <?= e($range['date_to']) ?></span>
+    </div>
+    <section class="panel">
+        <form method="get" class="report-filter">
+            <label>Tanggal awal<input type="date" name="date_from" value="<?= e($range['date_from']) ?>" required></label>
+            <label>Tanggal akhir<input type="date" name="date_to" value="<?= e($range['date_to']) ?>" required></label>
+            <button class="button button-primary" type="submit">Tampilkan laporan</button>
+            <a class="button button-secondary" href="/reports">Bulan berjalan</a>
+        </form>
+        <p class="muted report-definition">Pendapatan tagihan dan kas masuk mengikuti periode di atas. Piutang merupakan snapshot seluruh invoice yang masih belum lunas saat laporan dibuka.</p>
+    </section>
+    <section class="stat-grid">
+        <article class="stat-card"><span>Pendapatan ditagihkan</span><strong><?= e(rupiah($issued['billed_total'] ?? 0)) ?></strong><small><?= e($issued['invoice_count'] ?? 0) ?> invoice tidak dibatalkan</small></article>
+        <article class="stat-card stat-card-accent"><span>Kas masuk</span><strong><?= e(rupiah($cashSummary['cash_total'] ?? 0)) ?></strong><small><?= e($cashSummary['payment_count'] ?? 0) ?> pembayaran pada periode</small></article>
+        <article class="stat-card"><span>Piutang aktif</span><strong><?= e(rupiah($outstanding['outstanding_total'] ?? 0)) ?></strong><small><?= e($outstanding['invoice_count'] ?? 0) ?> invoice belum lunas</small></article>
+        <article class="stat-card"><span>Piutang overdue</span><strong><?= e(rupiah($outstanding['overdue_total'] ?? 0)) ?></strong><small><?= e($outstanding['overdue_count'] ?? 0) ?> melewati jatuh tempo</small></article>
+    </section>
+    <section class="report-grid">
+        <article class="panel">
+            <div class="section-heading"><div><h2>Rincian tagihan diterbitkan</h2><p class="muted">Komponen invoice dalam periode terpilih.</p></div></div>
+            <dl class="detail-list report-totals">
+                <div><dt>Harga dasar</dt><dd><?= e(rupiah($issued['base_total'] ?? 0)) ?></dd></div>
+                <div><dt>Diskon</dt><dd>− <?= e(rupiah($issued['discount_total'] ?? 0)) ?></dd></div>
+                <div><dt>Pajak</dt><dd><?= e(rupiah($issued['tax_total'] ?? 0)) ?></dd></div>
+                <div><dt>Denda</dt><dd><?= e(rupiah($issued['penalty_total'] ?? 0)) ?></dd></div>
+                <div class="report-total-row"><dt>Total ditagihkan</dt><dd><?= e(rupiah($issued['billed_total'] ?? 0)) ?></dd></div>
+            </dl>
+        </article>
+        <article class="panel">
+            <div class="section-heading"><div><h2>Aging piutang</h2><p class="muted">Umur seluruh invoice yang masih belum lunas.</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Kelompok umur</th><th>Nominal</th></tr></thead><tbody>
+                <?php foreach ($agingRows as $row): ?><tr><td><?= e($row['label']) ?></td><td><strong><?= e(rupiah($row['total'])) ?></strong></td></tr><?php endforeach; ?>
+            </tbody></table></div>
+        </article>
+    </section>
+    <section class="report-grid">
+        <article class="panel">
+            <div class="section-heading"><div><h2>Kas berdasarkan metode</h2><p class="muted">Ringkasan cara pembayaran pada periode.</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Metode</th><th>Transaksi</th><th>Kas masuk</th></tr></thead><tbody>
+                <?php if ($cashMethods === []): ?><tr><td colspan="3" class="muted">Belum ada pembayaran pada periode ini.</td></tr><?php endif; ?>
+                <?php foreach ($cashMethods as $method): ?><tr><td><span class="role-badge"><?= e($method['method']) ?></span></td><td><?= e($method['payment_count']) ?></td><td><strong><?= e(rupiah($method['cash_total'])) ?></strong></td></tr><?php endforeach; ?>
+            </tbody></table></div>
+        </article>
+        <article class="panel">
+            <div class="section-heading"><div><h2>Kas harian</h2><p class="muted">Penerimaan per tanggal dalam zona waktu ISP.</p></div></div>
+            <div class="table-wrap report-table-scroll"><table><thead><tr><th>Tanggal</th><th>Transaksi</th><th>Kas masuk</th></tr></thead><tbody>
+                <?php if ($dailyCash === []): ?><tr><td colspan="3" class="muted">Belum ada penerimaan kas pada periode ini.</td></tr><?php endif; ?>
+                <?php foreach ($dailyCash as $day): ?><tr><td><?= e($day['report_date']) ?></td><td><?= e($day['payment_count']) ?></td><td><strong><?= e(rupiah($day['cash_total'])) ?></strong></td></tr><?php endforeach; ?>
+            </tbody></table></div>
+        </article>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Prioritas penagihan</h2><p class="muted">Maksimal 20 invoice belum lunas, diurutkan dari jatuh tempo paling lama.</p></div><a class="button button-secondary" href="/invoices?status=overdue">Lihat semua overdue</a></div>
+        <div class="table-wrap"><table><thead><tr><th>Invoice</th><th>Pelanggan</th><th>Jatuh tempo</th><th>Umur</th><th>Piutang</th></tr></thead><tbody>
+            <?php if ($receivables === []): ?><tr><td colspan="5" class="muted">Tidak ada invoice yang perlu ditagih.</td></tr><?php endif; ?>
+            <?php foreach ($receivables as $receivable):
+                $dueDate = new DateTimeImmutable($receivable['due_date']);
+                $todayDate = new DateTimeImmutable($today);
+                $daysOverdue = $dueDate < $todayDate ? (int) $dueDate->diff($todayDate)->days : 0;
+                ?>
+                <tr>
+                    <td><a class="table-link" href="/invoices/view?id=<?= e($receivable['id']) ?>"><strong><?= e($receivable['invoice_number']) ?></strong></a></td>
+                    <td><?= e($receivable['customer_code']) ?><small><?= e($receivable['customer_name']) ?></small></td>
+                    <td><?= e($receivable['due_date']) ?></td>
+                    <td><?= $daysOverdue > 0 ? e($daysOverdue . ' hari terlambat') : '<span class="status">Belum jatuh tempo</span>' ?></td>
+                    <td><strong><?= e(rupiah($receivable['amount'])) ?></strong></td>
+                </tr>
+            <?php endforeach; ?>
+        </tbody></table></div>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
 if ($path === '/') {
     $counts = $db->prepare(
         "SELECT

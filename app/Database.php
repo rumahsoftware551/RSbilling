@@ -30,6 +30,13 @@ final class Database
             PDO::ATTR_STRINGIFY_FETCHES => false,
         ]);
 
+        $timezone = new DateTimeZone(date_default_timezone_get());
+        $offsetSeconds = $timezone->getOffset(new DateTimeImmutable('now', $timezone));
+        $sign = $offsetSeconds < 0 ? '-' : '+';
+        $absoluteOffset = abs($offsetSeconds);
+        $offset = sprintf('%s%02d:%02d', $sign, intdiv($absoluteOffset, 3600), intdiv($absoluteOffset % 3600, 60));
+        self::$connection->exec('SET time_zone = ' . self::$connection->quote($offset));
+
         return self::$connection;
     }
 }

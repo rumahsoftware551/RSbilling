@@ -97,4 +97,8 @@ if (!$indexExists($db, 'invoices', 'invoices_tenant_customer_period_unique')) {
     );
 }
 
+if (!$indexExists($db, 'invoices', 'invoices_tenant_created_idx')) {
+    $db->exec('ALTER TABLE invoices ADD KEY invoices_tenant_created_idx (tenant_id, created_at)');
+}
+
 fwrite(STDOUT, "Database siap.\n");
