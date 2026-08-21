@@ -31,9 +31,9 @@ Checklist ini diperbarui setiap kali satu milestone selesai dan telah melewati p
 - [x] detail pelanggan dan histori invoice
 - [x] detail invoice dan histori pembayaran
 - [x] arsip pelanggan/paket tanpa menghapus histori
-- [ ] pajak dan diskon
-- [ ] prorata dan denda keterlambatan
-- [ ] invoice PDF
+- [x] pajak dan diskon
+- [x] prorata dan denda keterlambatan idempotent
+- [x] invoice siap cetak dan disimpan sebagai PDF melalui browser
 - [ ] laporan piutang, pendapatan, dan kas
 - [ ] import pelanggan CSV dan export laporan
 - [ ] notifikasi WhatsApp/email dengan antrean

@@ -18,6 +18,8 @@ Sudah tersedia:
 - master paket dan pelanggan dengan edit status, pencarian, filter, serta pagination;
 - detail pelanggan, histori invoice/pembayaran, dan audit aktivitas;
 - arsip aman pelanggan/paket tanpa menghapus histori transaksi;
+- kalkulasi pajak, diskon, prorata, serta denda keterlambatan;
+- tampilan invoice siap cetak atau disimpan sebagai PDF dari browser;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
@@ -41,6 +43,8 @@ Edit `.env`, lalu ganti minimal nilai berikut dengan nilai unik:
 - `ADMIN_PASSWORD` (minimal 12 karakter)
 - `ADMIN_TENANT_NAME`
 - `ADMIN_TENANT_SLUG`
+
+`APP_TIMEZONE` default-nya `Asia/Jakarta`. Ganti dengan zona waktu IANA ISP apabila operasional berada di wilayah lain agar tanggal jatuh tempo, denda, dan waktu cetak konsisten.
 
 Password acak dapat dibuat dengan:
 

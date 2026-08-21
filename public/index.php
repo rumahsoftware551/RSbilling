@@ -552,6 +552,10 @@ if ($path === '/invoices' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
     $action = input('_action', 'create');
+    if (!in_array($action, ['create', 'pay', 'cancel', 'penalty', 'generate'], true)) {
+        flash('error', 'Aksi invoice tidak dikenali.');
+        redirect('/invoices');
+    }
 
     if ($action === 'pay') {
         $invoiceId = filter_var(input('invoice_id'), FILTER_VALIDATE_INT);
@@ -634,21 +638,83 @@ if ($path === '/invoices' && $method === 'POST') {
         redirect('/invoices');
     }
 
-    if ($action === 'generate') {
-        $month = input('billing_month');
-        $dueDate = input('due_date');
-        $periodStart = BillingService::periodStart($month);
-        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $dueDate);
-        if ($periodStart === null || !$date || $date->format('Y-m-d') !== $dueDate || $dueDate < $periodStart) {
-            flash('error', 'Periode atau jatuh tempo generator tidak valid.');
+    if ($action === 'penalty') {
+        $invoiceId = filter_var(input('invoice_id'), FILTER_VALIDATE_INT);
+        $penaltyAmount = filter_var(input('penalty_amount'), FILTER_VALIDATE_FLOAT);
+        if (!$invoiceId || $penaltyAmount === false || $penaltyAmount < 0) {
+            flash('error', 'Invoice atau nominal denda tidak valid.');
             redirect('/invoices');
         }
 
         $db->beginTransaction();
         try {
-            $result = BillingService::generateMonthly($db, $tenantId, $month, $dueDate);
+            $invoiceQuery = $db->prepare(
+                "SELECT id, status, due_date, subtotal, discount_amount, tax_amount, penalty_amount
+                 FROM invoices WHERE id = :id AND tenant_id = :tenant_id FOR UPDATE"
+            );
+            $invoiceQuery->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
+            $invoice = $invoiceQuery->fetch();
+            if (!$invoice || $invoice['status'] !== 'unpaid') {
+                throw new DomainException('Denda hanya dapat ditetapkan pada invoice yang belum lunas.');
+            }
+            if ($invoice['due_date'] >= date('Y-m-d')) {
+                throw new DomainException('Invoice belum melewati tanggal jatuh tempo.');
+            }
+
+            $total = BillingService::totalWithPenalty(
+                (float) $invoice['subtotal'],
+                (float) $invoice['discount_amount'],
+                (float) $invoice['tax_amount'],
+                (float) $penaltyAmount
+            );
+            $update = $db->prepare(
+                'UPDATE invoices SET penalty_amount = :penalty_amount, amount = :amount
+                 WHERE id = :id AND tenant_id = :tenant_id'
+            );
+            $update->execute([
+                'penalty_amount' => $penaltyAmount,
+                'amount' => $total,
+                'id' => $invoiceId,
+                'tenant_id' => $tenantId,
+            ]);
+            audit_event($db, 'invoice.penalty_updated', 'invoice', (int) $invoiceId, [
+                'previous_penalty' => $invoice['penalty_amount'],
+                'penalty_amount' => $penaltyAmount,
+                'amount' => $total,
+            ]);
+            $db->commit();
+            flash('success', 'Denda keterlambatan dan total invoice berhasil diperbarui.');
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof DomainException || $exception instanceof InvalidArgumentException) {
+                flash('error', $exception->getMessage());
+            } else {
+                throw $exception;
+            }
+        }
+        redirect('/invoices/view?id=' . $invoiceId);
+    }
+
+    if ($action === 'generate') {
+        $month = input('billing_month');
+        $dueDate = input('due_date');
+        $taxRate = filter_var(input('tax_rate', '0'), FILTER_VALIDATE_FLOAT);
+        $periodStart = BillingService::periodStart($month);
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $dueDate);
+        if ($periodStart === null || $taxRate === false || $taxRate < 0 || $taxRate > 100
+            || !$date || $date->format('Y-m-d') !== $dueDate || $dueDate < $periodStart) {
+            flash('error', 'Periode, pajak, atau jatuh tempo generator tidak valid.');
+            redirect('/invoices');
+        }
+
+        $db->beginTransaction();
+        try {
+            $result = BillingService::generateMonthly($db, $tenantId, $month, $dueDate, (float) $taxRate);
             audit_event($db, 'invoice.monthly_generated', 'invoice_batch', null, [
                 'month' => $month,
+                'tax_rate' => $taxRate,
                 'created' => $result['created'],
                 'existing' => $result['existing'],
                 'without_plan' => $result['without_plan'],
@@ -673,16 +739,33 @@ if ($path === '/invoices' && $method === 'POST') {
     }
 
     $customerId = filter_var(input('customer_id'), FILTER_VALIDATE_INT);
-    $amount = filter_var(input('amount'), FILTER_VALIDATE_FLOAT);
+    $baseAmount = filter_var(input('base_amount'), FILTER_VALIDATE_FLOAT);
+    $discountAmount = filter_var(input('discount_amount', '0'), FILTER_VALIDATE_FLOAT);
+    $taxRate = filter_var(input('tax_rate', '0'), FILTER_VALIDATE_FLOAT);
+    $prorationInput = input('proration_days');
+    $prorationDays = $prorationInput === '' ? null : filter_var($prorationInput, FILTER_VALIDATE_INT);
     $month = input('billing_month');
     $period = BillingService::monthLabel($month);
     $periodStart = BillingService::periodStart($month);
+    $totalDays = BillingService::daysInMonth($month);
     $dueDate = input('due_date');
     $date = DateTimeImmutable::createFromFormat('!Y-m-d', $dueDate);
-    if (!$customerId || $amount === false || $amount <= 0 || $amount > 9999999999999.99
-        || $period === null || $periodStart === null
+    if (!$customerId || $baseAmount === false || $discountAmount === false || $taxRate === false
+        || $prorationDays === false || $period === null || $periodStart === null || $totalDays === null
         || !$date || $date->format('Y-m-d') !== $dueDate || $dueDate < $periodStart) {
         flash('error', 'Data tagihan belum valid.');
+        redirect('/invoices');
+    }
+    try {
+        $totals = BillingService::calculateTotals(
+            (float) $baseAmount,
+            (float) $taxRate,
+            (float) $discountAmount,
+            $prorationDays,
+            $totalDays
+        );
+    } catch (InvalidArgumentException $exception) {
+        flash('error', $exception->getMessage());
         redirect('/invoices');
     }
     $customer = $db->prepare('SELECT id FROM customers WHERE id = :id AND tenant_id = :tenant_id AND status != \'terminated\'');
@@ -695,9 +778,13 @@ if ($path === '/invoices' && $method === 'POST') {
     try {
         $insert = $db->prepare(
             "INSERT INTO invoices
-                (tenant_id, customer_id, invoice_number, period_label, billing_period, amount, due_date, source)
+                (tenant_id, customer_id, invoice_number, period_label, billing_period,
+                 base_amount, subtotal, discount_amount, tax_rate, tax_amount, penalty_amount,
+                 proration_days, proration_total_days, amount, due_date, source)
              VALUES
-                (:tenant_id, :customer_id, :invoice_number, :period_label, :billing_period, :amount, :due_date, 'manual')"
+                (:tenant_id, :customer_id, :invoice_number, :period_label, :billing_period,
+                 :base_amount, :subtotal, :discount_amount, :tax_rate, :tax_amount, :penalty_amount,
+                 :proration_days, :proration_total_days, :amount, :due_date, 'manual')"
         );
         $insert->execute([
             'tenant_id' => $tenantId,
@@ -705,10 +792,26 @@ if ($path === '/invoices' && $method === 'POST') {
             'invoice_number' => $number,
             'period_label' => $period,
             'billing_period' => $periodStart,
-            'amount' => $amount,
+            'base_amount' => $totals['base_amount'],
+            'subtotal' => $totals['subtotal'],
+            'discount_amount' => $totals['discount_amount'],
+            'tax_rate' => $totals['tax_rate'],
+            'tax_amount' => $totals['tax_amount'],
+            'penalty_amount' => $totals['penalty_amount'],
+            'proration_days' => $totals['proration_days'],
+            'proration_total_days' => $totals['proration_total_days'],
+            'amount' => $totals['amount'],
             'due_date' => $dueDate,
         ]);
-        audit_event($db, 'invoice.created', 'invoice', (int) $db->lastInsertId(), ['number' => $number]);
+        audit_event($db, 'invoice.created', 'invoice', (int) $db->lastInsertId(), [
+            'number' => $number,
+            'base_amount' => $totals['base_amount'],
+            'subtotal' => $totals['subtotal'],
+            'discount_amount' => $totals['discount_amount'],
+            'tax_rate' => $totals['tax_rate'],
+            'proration_days' => $totals['proration_days'],
+            'amount' => $totals['amount'],
+        ]);
         flash('success', 'Tagihan berhasil diterbitkan.');
     } catch (PDOException $exception) {
         if ($exception->getCode() === '23000') {
@@ -1423,6 +1526,78 @@ if ($path === '/plans') {
     exit;
 }
 
+if ($path === '/invoices/print') {
+    $invoiceId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
+    if (!$invoiceId) {
+        flash('error', 'Invoice tidak valid.');
+        redirect('/invoices');
+    }
+
+    $printQuery = $db->prepare(
+        'SELECT i.id, i.invoice_number, i.period_label, i.base_amount, i.subtotal,
+                i.discount_amount, i.tax_rate, i.tax_amount, i.penalty_amount,
+                i.proration_days, i.proration_total_days, i.amount, i.due_date,
+                i.status, i.paid_at, i.created_at, c.customer_code, c.name AS customer_name,
+                c.phone, c.email, c.address, t.name AS tenant_name
+         FROM invoices i
+         INNER JOIN customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+         INNER JOIN tenants t ON t.id = i.tenant_id
+         WHERE i.id = :id AND i.tenant_id = :tenant_id LIMIT 1'
+    );
+    $printQuery->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
+    $invoice = $printQuery->fetch();
+    if (!$invoice) {
+        flash('error', 'Invoice tidak ditemukan pada ISP ini.');
+        redirect('/invoices');
+    }
+    ?>
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title><?= e($invoice['invoice_number']) ?> · <?= e($invoice['tenant_name']) ?></title>
+    <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="print-body">
+<main class="invoice-print-shell">
+    <div class="print-help no-print">
+        <div><strong>Invoice siap dicetak</strong><small>Tekan Ctrl+P, lalu pilih “Save as PDF” atau printer.</small></div>
+        <a class="button button-secondary" href="/invoices/view?id=<?= e($invoice['id']) ?>">Kembali ke detail</a>
+    </div>
+    <article class="invoice-document">
+        <header class="invoice-header">
+            <div><span class="invoice-brand-mark">RS</span><h1><?= e($invoice['tenant_name']) ?></h1><p>Billing layanan internet</p></div>
+            <div class="invoice-number"><span>INVOICE</span><strong><?= e($invoice['invoice_number']) ?></strong><small>Diterbitkan <?= e(substr($invoice['created_at'], 0, 10)) ?></small></div>
+        </header>
+        <section class="invoice-meta-grid">
+            <div><h2>Ditagihkan kepada</h2><strong><?= e($invoice['customer_code'] . ' · ' . $invoice['customer_name']) ?></strong><p><?= nl2br(e($invoice['address'] ?: 'Alamat belum tersedia')) ?></p><small><?= e($invoice['phone'] ?: '—') ?> · <?= e($invoice['email'] ?: '—') ?></small></div>
+            <div><h2>Informasi tagihan</h2><dl><div><dt>Periode</dt><dd><?= e($invoice['period_label']) ?></dd></div><div><dt>Jatuh tempo</dt><dd><?= e($invoice['due_date']) ?></dd></div><div><dt>Status</dt><dd><?= e(strtoupper($invoice['status'])) ?></dd></div></dl></div>
+        </section>
+        <table class="invoice-breakdown">
+            <thead><tr><th>Komponen</th><th>Keterangan</th><th>Jumlah</th></tr></thead>
+            <tbody>
+                <tr><td>Layanan internet</td><td><?= $invoice['proration_days'] !== null ? e('Prorata ' . $invoice['proration_days'] . '/' . $invoice['proration_total_days'] . ' hari dari ' . rupiah($invoice['base_amount'])) : 'Satu periode penuh' ?></td><td><?= e(rupiah($invoice['subtotal'])) ?></td></tr>
+                <?php if ((float) $invoice['discount_amount'] > 0): ?><tr><td>Diskon</td><td>Potongan tagihan</td><td>− <?= e(rupiah($invoice['discount_amount'])) ?></td></tr><?php endif; ?>
+                <?php if ((float) $invoice['tax_amount'] > 0): ?><tr><td>Pajak</td><td><?= e($invoice['tax_rate']) ?>%</td><td><?= e(rupiah($invoice['tax_amount'])) ?></td></tr><?php endif; ?>
+                <?php if ((float) $invoice['penalty_amount'] > 0): ?><tr><td>Denda</td><td>Keterlambatan pembayaran</td><td><?= e(rupiah($invoice['penalty_amount'])) ?></td></tr><?php endif; ?>
+            </tbody>
+            <tfoot><tr><th colspan="2">TOTAL</th><th><?= e(rupiah($invoice['amount'])) ?></th></tr></tfoot>
+        </table>
+        <section class="invoice-note">
+            <h2>Catatan</h2>
+            <p>Simpan invoice ini sebagai bukti tagihan. Hubungi ISP apabila terdapat perbedaan data atau pembayaran belum tercatat.</p>
+        </section>
+        <footer class="invoice-footer"><span>RS Billing · Invoice multi-tenant</span><span>Dicetak <?= e(date('Y-m-d H:i')) ?></span></footer>
+    </article>
+</main>
+</body>
+</html>
+    <?php
+    exit;
+}
+
 if ($path === '/invoices/view') {
     $invoiceId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
     if (!$invoiceId) {
@@ -1431,7 +1606,9 @@ if ($path === '/invoices/view') {
     }
 
     $invoiceQuery = $db->prepare(
-        'SELECT i.id, i.invoice_number, i.period_label, i.billing_period, i.amount, i.due_date,
+        'SELECT i.id, i.invoice_number, i.period_label, i.billing_period, i.base_amount,
+                i.subtotal, i.discount_amount, i.tax_rate, i.tax_amount, i.penalty_amount,
+                i.proration_days, i.proration_total_days, i.amount, i.due_date,
                 i.source, i.status, i.paid_at, i.created_at, i.updated_at,
                 c.id AS customer_id, c.customer_code, c.name AS customer_name, c.phone,
                 c.email, c.status AS customer_status, p.name AS plan_name, p.speed_label
@@ -1475,6 +1652,7 @@ if ($path === '/invoices/view') {
             <span class="status status-<?= $overdue ? 'overdue' : e($invoice['status']) ?>"><?= $overdue ? 'overdue' : e($invoice['status']) ?></span>
         </div>
         <div class="action-group">
+            <a class="button button-secondary" href="/invoices/print?id=<?= e($invoice['id']) ?>">Cetak / Simpan PDF</a>
             <?php if ($invoice['status'] === 'unpaid' && Auth::canManageBilling()): ?>
                 <form method="post" action="/invoices" class="inline-form">
                     <?= csrf_field() ?><input type="hidden" name="_action" value="pay"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>">
@@ -1493,7 +1671,13 @@ if ($path === '/invoices/view') {
             <h2>Informasi tagihan</h2>
             <dl class="detail-list">
                 <div><dt>Periode</dt><dd><?= e($invoice['period_label']) ?></dd></div>
-                <div><dt>Nominal</dt><dd><?= e(rupiah($invoice['amount'])) ?></dd></div>
+                <div><dt>Harga dasar</dt><dd><?= e(rupiah($invoice['base_amount'])) ?></dd></div>
+                <?php if ($invoice['proration_days'] !== null): ?><div><dt>Prorata</dt><dd><?= e($invoice['proration_days'] . ' dari ' . $invoice['proration_total_days'] . ' hari') ?></dd></div><?php endif; ?>
+                <div><dt>Subtotal</dt><dd><?= e(rupiah($invoice['subtotal'])) ?></dd></div>
+                <div><dt>Diskon</dt><dd>− <?= e(rupiah($invoice['discount_amount'])) ?></dd></div>
+                <div><dt>Pajak</dt><dd><?= e($invoice['tax_rate']) ?>% · <?= e(rupiah($invoice['tax_amount'])) ?></dd></div>
+                <div><dt>Denda</dt><dd><?= e(rupiah($invoice['penalty_amount'])) ?></dd></div>
+                <div><dt>Total</dt><dd><strong><?= e(rupiah($invoice['amount'])) ?></strong></dd></div>
                 <div><dt>Jatuh tempo</dt><dd><?= e($invoice['due_date']) ?></dd></div>
                 <div><dt>Sumber</dt><dd><span class="role-badge"><?= e($invoice['source']) ?></span></dd></div>
                 <div><dt>Dibuat</dt><dd><?= e($invoice['created_at']) ?></dd></div>
@@ -1512,6 +1696,16 @@ if ($path === '/invoices/view') {
             </dl>
         </article>
     </section>
+    <?php if ($overdue && Auth::canManageBilling()): ?>
+        <section class="panel notice-panel">
+            <div class="section-heading"><div><h2>Denda keterlambatan</h2><p class="muted">Nilai yang dimasukkan menggantikan denda lama, sehingga aman jika formulir dikirim ulang.</p></div><span class="status status-overdue">overdue</span></div>
+            <form method="post" action="/invoices" class="form-grid compact-form">
+                <?= csrf_field() ?><input type="hidden" name="_action" value="penalty"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>">
+                <label>Nominal denda<input type="number" name="penalty_amount" min="0" step="1000" value="<?= e($invoice['penalty_amount']) ?>" required></label>
+                <div class="form-action"><button class="button button-danger" type="submit">Perbarui denda</button></div>
+            </form>
+        </section>
+    <?php endif; ?>
     <section class="panel">
         <div class="section-heading"><div><h2>Histori pembayaran</h2><p class="muted">Semua pencatatan pembayaran untuk invoice ini.</p></div></div>
         <div class="table-wrap">
@@ -1560,7 +1754,8 @@ if ($path === '/invoices') {
         $params['search'] = '%' . $search . '%';
     }
     if ($statusFilter === 'overdue') {
-        $where[] = "i.status = 'unpaid' AND i.due_date < CURDATE()";
+        $where[] = "i.status = 'unpaid' AND i.due_date < :today";
+        $params['today'] = date('Y-m-d');
     } elseif ($statusFilter !== '') {
         $where[] = 'i.status = :status';
         $params['status'] = $statusFilter;
@@ -1602,6 +1797,7 @@ if ($path === '/invoices') {
                 <?= csrf_field() ?><input type="hidden" name="_action" value="generate">
                 <label>Periode<input type="month" name="billing_month" value="<?= e($defaultMonth) ?>" required></label>
                 <label>Jatuh tempo<input type="date" name="due_date" value="<?= e($defaultDueDate) ?>" required></label>
+                <label>Pajak (%)<input type="number" name="tax_rate" min="0" max="100" step="0.01" value="0" required></label>
                 <div class="field-wide"><button class="button button-primary" type="submit">Generate tagihan bulanan</button></div>
             </form>
         </section>
@@ -1611,7 +1807,10 @@ if ($path === '/invoices') {
                 <?= csrf_field() ?><input type="hidden" name="_action" value="create">
                 <label>Pelanggan<select name="customer_id" required><option value="">Pilih pelanggan</option><?php foreach ($customers as $customer): ?><option value="<?= e($customer['id']) ?>"><?= e($customer['customer_code'] . ' · ' . $customer['name']) ?></option><?php endforeach; ?></select></label>
                 <label>Periode<input type="month" name="billing_month" value="<?= e($defaultMonth) ?>" required></label>
-                <label>Nominal<input type="number" name="amount" min="1" step="1000" required></label>
+                <label>Harga dasar bulanan<input type="number" name="base_amount" min="1" step="1000" required></label>
+                <label>Hari aktif prorata (opsional)<input type="number" name="proration_days" min="1" max="31" placeholder="Kosongkan untuk satu bulan penuh"></label>
+                <label>Diskon nominal<input type="number" name="discount_amount" min="0" step="1000" value="0" required></label>
+                <label>Pajak (%)<input type="number" name="tax_rate" min="0" max="100" step="0.01" value="0" required></label>
                 <label>Jatuh tempo<input type="date" name="due_date" value="<?= e($defaultDueDate) ?>" required></label>
                 <div class="field-wide"><button class="button button-secondary" type="submit">Terbitkan manual</button></div>
             </form>

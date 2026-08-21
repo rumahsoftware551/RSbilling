@@ -5,6 +5,12 @@ declare(strict_types=1);
 require_once __DIR__ . '/helpers.php';
 load_env_file(base_path('.env'));
 
+$timezone = (string) env('APP_TIMEZONE', 'Asia/Jakarta');
+if (!in_array($timezone, timezone_identifiers_list(), true)) {
+    $timezone = 'UTC';
+}
+date_default_timezone_set($timezone);
+
 $debug = (bool) env('APP_DEBUG', false);
 ini_set('display_errors', $debug ? '1' : '0');
 ini_set('log_errors', '1');
