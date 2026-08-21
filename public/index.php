@@ -285,23 +285,37 @@ if ($path === '/users' && $method === 'POST') {
 if ($path === '/customers' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
+    $action = input('_action', 'create');
+    if (!in_array($action, ['create', 'update'], true)) {
+        flash('error', 'Aksi pelanggan tidak dikenali.');
+        redirect('/customers');
+    }
+    $customerId = filter_var(input('customer_id'), FILTER_VALIDATE_INT);
     $code = strtoupper(input('customer_code'));
     $name = input('name');
     $phone = input('phone');
     $email = input('email');
     $address = input('address');
     $planId = filter_var(input('plan_id'), FILTER_VALIDATE_INT) ?: null;
+    $status = input('status', 'active');
 
     if (!preg_match('/^[A-Z0-9._-]{2,30}$/', $code) || $name === '' || strlen($name) > 120) {
         flash('error', 'Kode atau nama pelanggan tidak valid.');
         redirect('/customers');
     }
-    if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    if ($email !== '' && (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 190)) {
         flash('error', 'Format email pelanggan tidak valid.');
         redirect('/customers');
     }
+    if ($action === 'update' && (!$customerId || !in_array($status, ['active', 'suspended', 'terminated'], true))) {
+        flash('error', 'Status atau ID pelanggan tidak valid.');
+        redirect('/customers');
+    }
     if ($planId !== null) {
-        $planCheck = $db->prepare('SELECT id FROM plans WHERE id = :id AND tenant_id = :tenant_id AND status = \'active\'');
+        $planSql = $action === 'update'
+            ? 'SELECT id FROM plans WHERE id = :id AND tenant_id = :tenant_id'
+            : 'SELECT id FROM plans WHERE id = :id AND tenant_id = :tenant_id AND status = \'active\'';
+        $planCheck = $db->prepare($planSql);
         $planCheck->execute(['id' => $planId, 'tenant_id' => $tenantId]);
         if (!$planCheck->fetchColumn()) {
             flash('error', 'Paket tidak ditemukan pada ISP ini.');
@@ -310,6 +324,38 @@ if ($path === '/customers' && $method === 'POST') {
     }
 
     try {
+        if ($action === 'update') {
+            $target = $db->prepare('SELECT id FROM customers WHERE id = :id AND tenant_id = :tenant_id');
+            $target->execute(['id' => $customerId, 'tenant_id' => $tenantId]);
+            if (!$target->fetchColumn()) {
+                flash('error', 'Pelanggan tidak ditemukan pada ISP ini.');
+                redirect('/customers');
+            }
+            $update = $db->prepare(
+                'UPDATE customers
+                 SET plan_id = :plan_id, customer_code = :customer_code, name = :name,
+                     phone = :phone, email = :email, address = :address, status = :status
+                 WHERE id = :id AND tenant_id = :tenant_id'
+            );
+            $update->execute([
+                'plan_id' => $planId,
+                'customer_code' => $code,
+                'name' => $name,
+                'phone' => substr($phone, 0, 30),
+                'email' => $email !== '' ? $email : null,
+                'address' => $address !== '' ? $address : null,
+                'status' => $status,
+                'id' => $customerId,
+                'tenant_id' => $tenantId,
+            ]);
+            audit_event($db, 'customer.updated', 'customer', (int) $customerId, [
+                'code' => $code,
+                'status' => $status,
+            ]);
+            flash('success', 'Data pelanggan berhasil diperbarui.');
+            redirect('/customers');
+        }
+
         $insert = $db->prepare(
             'INSERT INTO customers (tenant_id, plan_id, customer_code, name, phone, email, address)
              VALUES (:tenant_id, :plan_id, :customer_code, :name, :phone, :email, :address)'
@@ -338,15 +384,56 @@ if ($path === '/customers' && $method === 'POST') {
 if ($path === '/plans' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
+    $action = input('_action', 'create');
+    if (!in_array($action, ['create', 'update'], true)) {
+        flash('error', 'Aksi paket tidak dikenali.');
+        redirect('/plans');
+    }
+    $planId = filter_var(input('plan_id'), FILTER_VALIDATE_INT);
     $code = strtoupper(input('code'));
     $name = input('name');
     $speed = input('speed_label');
     $price = filter_var(input('price'), FILTER_VALIDATE_FLOAT);
-    if (!preg_match('/^[A-Z0-9._-]{2,30}$/', $code) || $name === '' || $speed === '' || $price === false || $price < 0) {
+    $status = input('status', 'active');
+    if (!preg_match('/^[A-Z0-9._-]{2,30}$/', $code) || $name === '' || $speed === ''
+        || $price === false || $price < 0 || $price > 9999999999999.99) {
         flash('error', 'Data paket belum valid.');
         redirect('/plans');
     }
+    if ($action === 'update' && (!$planId || !in_array($status, ['active', 'inactive'], true))) {
+        flash('error', 'Status atau ID paket tidak valid.');
+        redirect('/plans');
+    }
     try {
+        if ($action === 'update') {
+            $target = $db->prepare('SELECT id FROM plans WHERE id = :id AND tenant_id = :tenant_id');
+            $target->execute(['id' => $planId, 'tenant_id' => $tenantId]);
+            if (!$target->fetchColumn()) {
+                flash('error', 'Paket tidak ditemukan pada ISP ini.');
+                redirect('/plans');
+            }
+            $update = $db->prepare(
+                'UPDATE plans SET code = :code, name = :name, speed_label = :speed_label,
+                    price = :price, status = :status
+                 WHERE id = :id AND tenant_id = :tenant_id'
+            );
+            $update->execute([
+                'code' => $code,
+                'name' => substr($name, 0, 120),
+                'speed_label' => substr($speed, 0, 80),
+                'price' => $price,
+                'status' => $status,
+                'id' => $planId,
+                'tenant_id' => $tenantId,
+            ]);
+            audit_event($db, 'plan.updated', 'plan', (int) $planId, [
+                'code' => $code,
+                'status' => $status,
+            ]);
+            flash('success', 'Paket internet berhasil diperbarui.');
+            redirect('/plans');
+        }
+
         $insert = $db->prepare(
             'INSERT INTO plans (tenant_id, code, name, speed_label, price)
              VALUES (:tenant_id, :code, :name, :speed_label, :price)'
@@ -419,12 +506,91 @@ if ($path === '/invoices' && $method === 'POST') {
         redirect('/invoices');
     }
 
+    if ($action === 'cancel') {
+        $invoiceId = filter_var(input('invoice_id'), FILTER_VALIDATE_INT);
+        if (!$invoiceId) {
+            flash('error', 'Tagihan tidak valid.');
+            redirect('/invoices');
+        }
+        $db->beginTransaction();
+        try {
+            $invoiceQuery = $db->prepare(
+                "SELECT id, status FROM invoices
+                 WHERE id = :id AND tenant_id = :tenant_id FOR UPDATE"
+            );
+            $invoiceQuery->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
+            $invoice = $invoiceQuery->fetch();
+            if (!$invoice || $invoice['status'] !== 'unpaid') {
+                throw new DomainException('Hanya tagihan belum lunas yang dapat dibatalkan.');
+            }
+            $db->prepare(
+                "UPDATE invoices SET status = 'cancelled'
+                 WHERE id = :id AND tenant_id = :tenant_id"
+            )->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
+            audit_event($db, 'invoice.cancelled', 'invoice', (int) $invoiceId);
+            $db->commit();
+            flash('success', 'Tagihan berhasil dibatalkan.');
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof DomainException) {
+                flash('error', $exception->getMessage());
+            } else {
+                throw $exception;
+            }
+        }
+        redirect('/invoices');
+    }
+
+    if ($action === 'generate') {
+        $month = input('billing_month');
+        $dueDate = input('due_date');
+        $periodStart = BillingService::periodStart($month);
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $dueDate);
+        if ($periodStart === null || !$date || $date->format('Y-m-d') !== $dueDate || $dueDate < $periodStart) {
+            flash('error', 'Periode atau jatuh tempo generator tidak valid.');
+            redirect('/invoices');
+        }
+
+        $db->beginTransaction();
+        try {
+            $result = BillingService::generateMonthly($db, $tenantId, $month, $dueDate);
+            audit_event($db, 'invoice.monthly_generated', 'invoice_batch', null, [
+                'month' => $month,
+                'created' => $result['created'],
+                'existing' => $result['existing'],
+                'without_plan' => $result['without_plan'],
+            ]);
+            $db->commit();
+            flash(
+                'success',
+                sprintf(
+                    'Generator selesai: %d dibuat, %d sudah ada, %d tanpa paket aktif.',
+                    $result['created'],
+                    $result['existing'],
+                    $result['without_plan']
+                )
+            );
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            throw $exception;
+        }
+        redirect('/invoices');
+    }
+
     $customerId = filter_var(input('customer_id'), FILTER_VALIDATE_INT);
     $amount = filter_var(input('amount'), FILTER_VALIDATE_FLOAT);
-    $period = input('period_label');
+    $month = input('billing_month');
+    $period = BillingService::monthLabel($month);
+    $periodStart = BillingService::periodStart($month);
     $dueDate = input('due_date');
     $date = DateTimeImmutable::createFromFormat('!Y-m-d', $dueDate);
-    if (!$customerId || $amount === false || $amount <= 0 || $period === '' || !$date || $date->format('Y-m-d') !== $dueDate) {
+    if (!$customerId || $amount === false || $amount <= 0 || $amount > 9999999999999.99
+        || $period === null || $periodStart === null
+        || !$date || $date->format('Y-m-d') !== $dueDate || $dueDate < $periodStart) {
         flash('error', 'Data tagihan belum valid.');
         redirect('/invoices');
     }
@@ -435,20 +601,31 @@ if ($path === '/invoices' && $method === 'POST') {
         redirect('/invoices');
     }
     $number = 'INV-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(3)));
-    $insert = $db->prepare(
-        'INSERT INTO invoices (tenant_id, customer_id, invoice_number, period_label, amount, due_date)
-         VALUES (:tenant_id, :customer_id, :invoice_number, :period_label, :amount, :due_date)'
-    );
-    $insert->execute([
-        'tenant_id' => $tenantId,
-        'customer_id' => $customerId,
-        'invoice_number' => $number,
-        'period_label' => substr($period, 0, 40),
-        'amount' => $amount,
-        'due_date' => $dueDate,
-    ]);
-    audit_event($db, 'invoice.created', 'invoice', (int) $db->lastInsertId(), ['number' => $number]);
-    flash('success', 'Tagihan berhasil diterbitkan.');
+    try {
+        $insert = $db->prepare(
+            "INSERT INTO invoices
+                (tenant_id, customer_id, invoice_number, period_label, billing_period, amount, due_date, source)
+             VALUES
+                (:tenant_id, :customer_id, :invoice_number, :period_label, :billing_period, :amount, :due_date, 'manual')"
+        );
+        $insert->execute([
+            'tenant_id' => $tenantId,
+            'customer_id' => $customerId,
+            'invoice_number' => $number,
+            'period_label' => $period,
+            'billing_period' => $periodStart,
+            'amount' => $amount,
+            'due_date' => $dueDate,
+        ]);
+        audit_event($db, 'invoice.created', 'invoice', (int) $db->lastInsertId(), ['number' => $number]);
+        flash('success', 'Tagihan berhasil diterbitkan.');
+    } catch (PDOException $exception) {
+        if ($exception->getCode() === '23000') {
+            flash('error', 'Tagihan pelanggan untuk periode tersebut sudah tersedia.');
+        } else {
+            throw $exception;
+        }
+    }
     redirect('/invoices');
 }
 
@@ -636,36 +813,276 @@ if ($path === '/') {
     exit;
 }
 
+if ($path === '/customers/edit') {
+    Auth::requireBillingAccess();
+    $customerId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
+    if (!$customerId) {
+        flash('error', 'Pelanggan tidak valid.');
+        redirect('/customers');
+    }
+    $customerQuery = $db->prepare(
+        'SELECT id, plan_id, customer_code, name, phone, email, address, status
+         FROM customers WHERE id = :id AND tenant_id = :tenant_id LIMIT 1'
+    );
+    $customerQuery->execute(['id' => $customerId, 'tenant_id' => $tenantId]);
+    $customer = $customerQuery->fetch();
+    if (!$customer) {
+        flash('error', 'Pelanggan tidak ditemukan pada ISP ini.');
+        redirect('/customers');
+    }
+    $plansQuery = $db->prepare(
+        'SELECT id, name, speed_label, status FROM plans
+         WHERE tenant_id = :tenant_id ORDER BY status, name'
+    );
+    $plansQuery->execute(['tenant_id' => $tenantId]);
+    $plans = $plansQuery->fetchAll();
+    View::header('Edit Pelanggan');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Master data</p><h1>Edit pelanggan</h1></div>
+        <a class="button button-secondary" href="/customers">Kembali</a>
+    </div>
+    <section class="panel">
+        <form method="post" action="/customers" class="form-grid">
+            <?= csrf_field() ?>
+            <input type="hidden" name="_action" value="update">
+            <input type="hidden" name="customer_id" value="<?= e($customer['id']) ?>">
+            <label>Kode pelanggan<input name="customer_code" maxlength="30" required value="<?= e($customer['customer_code']) ?>"></label>
+            <label>Nama lengkap<input name="name" maxlength="120" required value="<?= e($customer['name']) ?>"></label>
+            <label>Nomor WhatsApp<input name="phone" maxlength="30" value="<?= e($customer['phone']) ?>"></label>
+            <label>Email<input type="email" name="email" maxlength="190" value="<?= e($customer['email'] ?? '') ?>"></label>
+            <label>Paket
+                <select name="plan_id">
+                    <option value="">Belum ditentukan</option>
+                    <?php foreach ($plans as $plan): ?>
+                        <option value="<?= e($plan['id']) ?>"<?= (int) $customer['plan_id'] === (int) $plan['id'] ? ' selected' : '' ?>>
+                            <?= e($plan['name'] . ' · ' . $plan['speed_label'] . ($plan['status'] === 'inactive' ? ' (nonaktif)' : '')) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label>Status
+                <select name="status" required>
+                    <?php foreach (['active' => 'Aktif', 'suspended' => 'Suspend', 'terminated' => 'Berhenti'] as $value => $label): ?>
+                        <option value="<?= e($value) ?>"<?= $customer['status'] === $value ? ' selected' : '' ?>><?= e($label) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label class="field-wide">Alamat<textarea name="address" rows="3"><?= e($customer['address'] ?? '') ?></textarea></label>
+            <div class="field-wide"><button class="button button-primary" type="submit">Simpan perubahan</button></div>
+        </form>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
+if ($path === '/plans/edit') {
+    Auth::requireBillingAccess();
+    $planId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
+    if (!$planId) {
+        flash('error', 'Paket tidak valid.');
+        redirect('/plans');
+    }
+    $planQuery = $db->prepare(
+        'SELECT id, code, name, speed_label, price, status
+         FROM plans WHERE id = :id AND tenant_id = :tenant_id LIMIT 1'
+    );
+    $planQuery->execute(['id' => $planId, 'tenant_id' => $tenantId]);
+    $plan = $planQuery->fetch();
+    if (!$plan) {
+        flash('error', 'Paket tidak ditemukan pada ISP ini.');
+        redirect('/plans');
+    }
+    View::header('Edit Paket');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Produk layanan</p><h1>Edit paket</h1></div>
+        <a class="button button-secondary" href="/plans">Kembali</a>
+    </div>
+    <section class="panel">
+        <form method="post" action="/plans" class="form-grid">
+            <?= csrf_field() ?>
+            <input type="hidden" name="_action" value="update">
+            <input type="hidden" name="plan_id" value="<?= e($plan['id']) ?>">
+            <label>Kode paket<input name="code" maxlength="30" required value="<?= e($plan['code']) ?>"></label>
+            <label>Nama paket<input name="name" maxlength="120" required value="<?= e($plan['name']) ?>"></label>
+            <label>Kecepatan<input name="speed_label" maxlength="80" required value="<?= e($plan['speed_label']) ?>"></label>
+            <label>Harga bulanan<input type="number" name="price" min="0" step="1000" required value="<?= e($plan['price']) ?>"></label>
+            <label>Status
+                <select name="status" required>
+                    <option value="active"<?= $plan['status'] === 'active' ? ' selected' : '' ?>>Aktif</option>
+                    <option value="inactive"<?= $plan['status'] === 'inactive' ? ' selected' : '' ?>>Nonaktif</option>
+                </select>
+            </label>
+            <div class="field-wide"><button class="button button-primary" type="submit">Simpan perubahan</button></div>
+        </form>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
 if ($path === '/customers') {
     $plansQuery = $db->prepare("SELECT id, name, speed_label FROM plans WHERE tenant_id = :tenant_id AND status = 'active' ORDER BY name");
     $plansQuery->execute(['tenant_id' => $tenantId]);
     $plans = $plansQuery->fetchAll();
+
+    $search = substr(query_input('q'), 0, 80);
+    $statusFilter = query_input('status');
+    if (!in_array($statusFilter, ['', 'active', 'suspended', 'terminated'], true)) {
+        $statusFilter = '';
+    }
+    $where = ['c.tenant_id = :tenant_id'];
+    $params = ['tenant_id' => $tenantId];
+    if ($search !== '') {
+        $where[] = "CONCAT_WS(' ', c.customer_code, c.name, c.phone, COALESCE(c.email, '')) LIKE :search";
+        $params['search'] = '%' . $search . '%';
+    }
+    if ($statusFilter !== '') {
+        $where[] = 'c.status = :status';
+        $params['status'] = $statusFilter;
+    }
+    $whereSql = implode(' AND ', $where);
+    $countQuery = $db->prepare('SELECT COUNT(*) FROM customers c WHERE ' . $whereSql);
+    $countQuery->execute($params);
+    $pagination = new Pagination((int) $countQuery->fetchColumn(), requested_page());
     $customersQuery = $db->prepare(
-        'SELECT c.customer_code, c.name, c.phone, c.status, p.name AS plan_name, p.speed_label
-         FROM customers c LEFT JOIN plans p ON p.id = c.plan_id
-         WHERE c.tenant_id = :tenant_id ORDER BY c.id DESC LIMIT 100'
+        'SELECT c.id, c.customer_code, c.name, c.phone, c.email, c.status,
+                p.name AS plan_name, p.speed_label
+         FROM customers c LEFT JOIN plans p ON p.id = c.plan_id AND p.tenant_id = c.tenant_id
+         WHERE ' . $whereSql . '
+         ORDER BY c.id DESC LIMIT :limit OFFSET :offset'
     );
-    $customersQuery->execute(['tenant_id' => $tenantId]);
+    foreach ($params as $key => $value) {
+        $customersQuery->bindValue(':' . $key, $value);
+    }
+    $customersQuery->bindValue(':limit', $pagination->perPage, PDO::PARAM_INT);
+    $customersQuery->bindValue(':offset', $pagination->offset(), PDO::PARAM_INT);
+    $customersQuery->execute();
+    $customers = $customersQuery->fetchAll();
     View::header('Pelanggan');
     ?>
     <div class="page-heading"><div><p class="eyebrow">Master data</p><h1>Pelanggan</h1></div></div>
     <?php if (Auth::canManageBilling()): ?>
-    <section class="panel"><h2>Tambah pelanggan</h2><form method="post" class="form-grid"><?= csrf_field() ?><label>Kode pelanggan<input name="customer_code" maxlength="30" required placeholder="CUST-001"></label><label>Nama lengkap<input name="name" maxlength="120" required></label><label>Nomor WhatsApp<input name="phone" maxlength="30"></label><label>Email<input type="email" name="email" maxlength="190"></label><label>Paket<select name="plan_id"><option value="">Belum ditentukan</option><?php foreach ($plans as $plan): ?><option value="<?= e($plan['id']) ?>"><?= e($plan['name'] . ' · ' . $plan['speed_label']) ?></option><?php endforeach; ?></select></label><label class="field-wide">Alamat<textarea name="address" rows="2"></textarea></label><div class="field-wide"><button class="button button-primary" type="submit">Simpan pelanggan</button></div></form></section>
+    <section class="panel">
+        <h2>Tambah pelanggan</h2>
+        <form method="post" class="form-grid">
+            <?= csrf_field() ?><input type="hidden" name="_action" value="create">
+            <label>Kode pelanggan<input name="customer_code" maxlength="30" required placeholder="CUST-001"></label>
+            <label>Nama lengkap<input name="name" maxlength="120" required></label>
+            <label>Nomor WhatsApp<input name="phone" maxlength="30"></label>
+            <label>Email<input type="email" name="email" maxlength="190"></label>
+            <label>Paket<select name="plan_id"><option value="">Belum ditentukan</option><?php foreach ($plans as $plan): ?><option value="<?= e($plan['id']) ?>"><?= e($plan['name'] . ' · ' . $plan['speed_label']) ?></option><?php endforeach; ?></select></label>
+            <label class="field-wide">Alamat<textarea name="address" rows="2"></textarea></label>
+            <div class="field-wide"><button class="button button-primary" type="submit">Simpan pelanggan</button></div>
+        </form>
+    </section>
     <?php endif; ?>
-    <section class="panel"><h2>Daftar pelanggan</h2><div class="table-wrap"><table><thead><tr><th>Kode</th><th>Nama</th><th>Paket</th><th>WhatsApp</th><th>Status</th></tr></thead><tbody><?php foreach ($customersQuery as $customer): ?><tr><td><strong><?= e($customer['customer_code']) ?></strong></td><td><?= e($customer['name']) ?></td><td><?= e($customer['plan_name'] ?? '—') ?><small><?= e($customer['speed_label'] ?? '') ?></small></td><td><?= e($customer['phone'] ?: '—') ?></td><td><span class="status status-<?= e($customer['status']) ?>"><?= e($customer['status']) ?></span></td></tr><?php endforeach; ?></tbody></table></div></section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Daftar pelanggan</h2><p class="muted">Cari berdasarkan kode, nama, WhatsApp, atau email.</p></div></div>
+        <form method="get" class="filter-form">
+            <label>Pencarian<input name="q" maxlength="80" value="<?= e($search) ?>" placeholder="Kode atau nama pelanggan"></label>
+            <label>Status<select name="status"><option value="">Semua status</option><option value="active"<?= $statusFilter === 'active' ? ' selected' : '' ?>>Aktif</option><option value="suspended"<?= $statusFilter === 'suspended' ? ' selected' : '' ?>>Suspend</option><option value="terminated"<?= $statusFilter === 'terminated' ? ' selected' : '' ?>>Berhenti</option></select></label>
+            <button class="button button-primary" type="submit">Terapkan</button>
+            <a class="button button-secondary" href="/customers">Reset</a>
+        </form>
+        <div class="table-wrap">
+            <table><thead><tr><th>Kode</th><th>Nama</th><th>Paket</th><th>Kontak</th><th>Status</th><th>Aksi</th></tr></thead>
+                <tbody>
+                <?php if ($customers === []): ?><tr><td colspan="6" class="muted">Belum ada pelanggan yang sesuai.</td></tr><?php endif; ?>
+                <?php foreach ($customers as $customer): ?>
+                    <tr>
+                        <td><strong><?= e($customer['customer_code']) ?></strong></td>
+                        <td><?= e($customer['name']) ?></td>
+                        <td><?= e($customer['plan_name'] ?? '—') ?><small><?= e($customer['speed_label'] ?? '') ?></small></td>
+                        <td><?= e($customer['phone'] ?: '—') ?><small><?= e($customer['email'] ?: '') ?></small></td>
+                        <td><span class="status status-<?= e($customer['status']) ?>"><?= e($customer['status']) ?></span></td>
+                        <td><?php if (Auth::canManageBilling()): ?><a class="button button-link" href="/customers/edit?id=<?= e($customer['id']) ?>">Edit</a><?php else: ?>—<?php endif; ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php View::pagination($pagination); ?>
+    </section>
     <?php
     View::footer();
     exit;
 }
 
 if ($path === '/plans') {
-    $plansQuery = $db->prepare('SELECT code, name, speed_label, price, status FROM plans WHERE tenant_id = :tenant_id ORDER BY id DESC');
-    $plansQuery->execute(['tenant_id' => $tenantId]);
+    $search = substr(query_input('q'), 0, 80);
+    $statusFilter = query_input('status');
+    if (!in_array($statusFilter, ['', 'active', 'inactive'], true)) {
+        $statusFilter = '';
+    }
+    $where = ['tenant_id = :tenant_id'];
+    $params = ['tenant_id' => $tenantId];
+    if ($search !== '') {
+        $where[] = "CONCAT_WS(' ', code, name, speed_label) LIKE :search";
+        $params['search'] = '%' . $search . '%';
+    }
+    if ($statusFilter !== '') {
+        $where[] = 'status = :status';
+        $params['status'] = $statusFilter;
+    }
+    $whereSql = implode(' AND ', $where);
+    $countQuery = $db->prepare('SELECT COUNT(*) FROM plans WHERE ' . $whereSql);
+    $countQuery->execute($params);
+    $pagination = new Pagination((int) $countQuery->fetchColumn(), requested_page());
+    $plansQuery = $db->prepare(
+        'SELECT id, code, name, speed_label, price, status FROM plans
+         WHERE ' . $whereSql . ' ORDER BY id DESC LIMIT :limit OFFSET :offset'
+    );
+    foreach ($params as $key => $value) {
+        $plansQuery->bindValue(':' . $key, $value);
+    }
+    $plansQuery->bindValue(':limit', $pagination->perPage, PDO::PARAM_INT);
+    $plansQuery->bindValue(':offset', $pagination->offset(), PDO::PARAM_INT);
+    $plansQuery->execute();
+    $plans = $plansQuery->fetchAll();
     View::header('Paket');
     ?>
     <div class="page-heading"><div><p class="eyebrow">Produk layanan</p><h1>Paket internet</h1></div></div>
-    <?php if (Auth::canManageBilling()): ?><section class="panel"><h2>Tambah paket</h2><form method="post" class="form-grid"><?= csrf_field() ?><label>Kode paket<input name="code" maxlength="30" required placeholder="HOME-20"></label><label>Nama paket<input name="name" maxlength="120" required></label><label>Kecepatan<input name="speed_label" maxlength="80" required placeholder="20 Mbps"></label><label>Harga bulanan<input type="number" name="price" min="0" step="1000" required></label><div class="field-wide"><button class="button button-primary" type="submit">Simpan paket</button></div></form></section><?php endif; ?>
-    <section class="panel"><h2>Daftar paket</h2><div class="table-wrap"><table><thead><tr><th>Kode</th><th>Nama</th><th>Kecepatan</th><th>Harga</th><th>Status</th></tr></thead><tbody><?php foreach ($plansQuery as $plan): ?><tr><td><strong><?= e($plan['code']) ?></strong></td><td><?= e($plan['name']) ?></td><td><?= e($plan['speed_label']) ?></td><td><?= e(rupiah($plan['price'])) ?></td><td><span class="status status-<?= e($plan['status']) ?>"><?= e($plan['status']) ?></span></td></tr><?php endforeach; ?></tbody></table></div></section>
+    <?php if (Auth::canManageBilling()): ?>
+        <section class="panel">
+            <h2>Tambah paket</h2>
+            <form method="post" class="form-grid">
+                <?= csrf_field() ?><input type="hidden" name="_action" value="create">
+                <label>Kode paket<input name="code" maxlength="30" required placeholder="HOME-20"></label>
+                <label>Nama paket<input name="name" maxlength="120" required></label>
+                <label>Kecepatan<input name="speed_label" maxlength="80" required placeholder="20 Mbps"></label>
+                <label>Harga bulanan<input type="number" name="price" min="0" step="1000" required></label>
+                <div class="field-wide"><button class="button button-primary" type="submit">Simpan paket</button></div>
+            </form>
+        </section>
+    <?php endif; ?>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Daftar paket</h2><p class="muted">Cari berdasarkan kode, nama, atau kecepatan.</p></div></div>
+        <form method="get" class="filter-form">
+            <label>Pencarian<input name="q" maxlength="80" value="<?= e($search) ?>" placeholder="Kode atau nama paket"></label>
+            <label>Status<select name="status"><option value="">Semua status</option><option value="active"<?= $statusFilter === 'active' ? ' selected' : '' ?>>Aktif</option><option value="inactive"<?= $statusFilter === 'inactive' ? ' selected' : '' ?>>Nonaktif</option></select></label>
+            <button class="button button-primary" type="submit">Terapkan</button>
+            <a class="button button-secondary" href="/plans">Reset</a>
+        </form>
+        <div class="table-wrap">
+            <table><thead><tr><th>Kode</th><th>Nama</th><th>Kecepatan</th><th>Harga</th><th>Status</th><th>Aksi</th></tr></thead>
+                <tbody>
+                <?php if ($plans === []): ?><tr><td colspan="6" class="muted">Belum ada paket yang sesuai.</td></tr><?php endif; ?>
+                <?php foreach ($plans as $plan): ?>
+                    <tr>
+                        <td><strong><?= e($plan['code']) ?></strong></td><td><?= e($plan['name']) ?></td>
+                        <td><?= e($plan['speed_label']) ?></td><td><?= e(rupiah($plan['price'])) ?></td>
+                        <td><span class="status status-<?= e($plan['status']) ?>"><?= e($plan['status']) ?></span></td>
+                        <td><?php if (Auth::canManageBilling()): ?><a class="button button-link" href="/plans/edit?id=<?= e($plan['id']) ?>">Edit</a><?php else: ?>—<?php endif; ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php View::pagination($pagination); ?>
+    </section>
     <?php
     View::footer();
     exit;
@@ -675,17 +1092,115 @@ if ($path === '/invoices') {
     $customersQuery = $db->prepare("SELECT id, customer_code, name FROM customers WHERE tenant_id = :tenant_id AND status = 'active' ORDER BY name");
     $customersQuery->execute(['tenant_id' => $tenantId]);
     $customers = $customersQuery->fetchAll();
-    $invoicesQuery = $db->prepare(
-        'SELECT i.id, i.invoice_number, i.period_label, i.amount, i.due_date, i.status, c.customer_code, c.name AS customer_name
-         FROM invoices i INNER JOIN customers c ON c.id = i.customer_id
-         WHERE i.tenant_id = :tenant_id ORDER BY i.id DESC LIMIT 100'
+
+    $search = substr(query_input('q'), 0, 80);
+    $statusFilter = query_input('status');
+    if (!in_array($statusFilter, ['', 'unpaid', 'paid', 'cancelled', 'overdue'], true)) {
+        $statusFilter = '';
+    }
+    $monthFilter = query_input('month');
+    if ($monthFilter !== '' && BillingService::periodStart($monthFilter) === null) {
+        $monthFilter = '';
+    }
+    $where = ['i.tenant_id = :tenant_id'];
+    $params = ['tenant_id' => $tenantId];
+    if ($search !== '') {
+        $where[] = "CONCAT_WS(' ', i.invoice_number, c.customer_code, c.name) LIKE :search";
+        $params['search'] = '%' . $search . '%';
+    }
+    if ($statusFilter === 'overdue') {
+        $where[] = "i.status = 'unpaid' AND i.due_date < CURDATE()";
+    } elseif ($statusFilter !== '') {
+        $where[] = 'i.status = :status';
+        $params['status'] = $statusFilter;
+    }
+    if ($monthFilter !== '') {
+        $where[] = 'i.billing_period = :billing_period';
+        $params['billing_period'] = BillingService::periodStart($monthFilter);
+    }
+    $whereSql = implode(' AND ', $where);
+    $countQuery = $db->prepare(
+        'SELECT COUNT(*) FROM invoices i
+         INNER JOIN customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+         WHERE ' . $whereSql
     );
-    $invoicesQuery->execute(['tenant_id' => $tenantId]);
+    $countQuery->execute($params);
+    $pagination = new Pagination((int) $countQuery->fetchColumn(), requested_page());
+    $invoicesQuery = $db->prepare(
+        'SELECT i.id, i.invoice_number, i.period_label, i.billing_period, i.amount,
+                i.due_date, i.status, i.source, c.customer_code, c.name AS customer_name
+         FROM invoices i INNER JOIN customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+         WHERE ' . $whereSql . ' ORDER BY i.id DESC LIMIT :limit OFFSET :offset'
+    );
+    foreach ($params as $key => $value) {
+        $invoicesQuery->bindValue(':' . $key, $value);
+    }
+    $invoicesQuery->bindValue(':limit', $pagination->perPage, PDO::PARAM_INT);
+    $invoicesQuery->bindValue(':offset', $pagination->offset(), PDO::PARAM_INT);
+    $invoicesQuery->execute();
+    $invoices = $invoicesQuery->fetchAll();
+    $defaultMonth = date('Y-m');
+    $defaultDueDate = date('Y-m-d', strtotime('+10 days'));
     View::header('Tagihan');
     ?>
     <div class="page-heading"><div><p class="eyebrow">Keuangan</p><h1>Tagihan</h1></div></div>
-    <?php if (Auth::canManageBilling()): ?><section class="panel"><h2>Terbitkan tagihan</h2><form method="post" class="form-grid"><?= csrf_field() ?><input type="hidden" name="_action" value="create"><label>Pelanggan<select name="customer_id" required><option value="">Pilih pelanggan</option><?php foreach ($customers as $customer): ?><option value="<?= e($customer['id']) ?>"><?= e($customer['customer_code'] . ' · ' . $customer['name']) ?></option><?php endforeach; ?></select></label><label>Periode<input name="period_label" maxlength="40" required placeholder="Agustus 2026"></label><label>Nominal<input type="number" name="amount" min="1" step="1000" required></label><label>Jatuh tempo<input type="date" name="due_date" required></label><div class="field-wide"><button class="button button-primary" type="submit">Terbitkan tagihan</button></div></form></section><?php endif; ?>
-    <section class="panel"><h2>Daftar tagihan</h2><div class="table-wrap"><table><thead><tr><th>Invoice</th><th>Pelanggan</th><th>Periode</th><th>Jatuh tempo</th><th>Nominal</th><th>Status</th><th>Aksi</th></tr></thead><tbody><?php foreach ($invoicesQuery as $invoice): $overdue = $invoice['status'] === 'unpaid' && $invoice['due_date'] < date('Y-m-d'); ?><tr><td><strong><?= e($invoice['invoice_number']) ?></strong></td><td><?= e($invoice['customer_code']) ?><small><?= e($invoice['customer_name']) ?></small></td><td><?= e($invoice['period_label']) ?></td><td><?= e($invoice['due_date']) ?></td><td><?= e(rupiah($invoice['amount'])) ?></td><td><span class="status status-<?= $overdue ? 'overdue' : e($invoice['status']) ?>"><?= $overdue ? 'overdue' : e($invoice['status']) ?></span></td><td><?php if ($invoice['status'] === 'unpaid' && Auth::canManageBilling()): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="pay"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>"><button class="button button-small" type="submit">Tandai lunas</button></form><?php else: ?>—<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div></section>
+    <?php if (Auth::canManageBilling()): ?>
+        <section class="panel">
+            <div class="section-heading"><div><h2>Generator tagihan bulanan</h2><p class="muted">Membuat satu tagihan untuk setiap pelanggan aktif yang memiliki paket aktif.</p></div><span class="secure-badge">Anti duplikat</span></div>
+            <form method="post" class="form-grid">
+                <?= csrf_field() ?><input type="hidden" name="_action" value="generate">
+                <label>Periode<input type="month" name="billing_month" value="<?= e($defaultMonth) ?>" required></label>
+                <label>Jatuh tempo<input type="date" name="due_date" value="<?= e($defaultDueDate) ?>" required></label>
+                <div class="field-wide"><button class="button button-primary" type="submit">Generate tagihan bulanan</button></div>
+            </form>
+        </section>
+        <section class="panel">
+            <h2>Terbitkan tagihan manual</h2>
+            <form method="post" class="form-grid">
+                <?= csrf_field() ?><input type="hidden" name="_action" value="create">
+                <label>Pelanggan<select name="customer_id" required><option value="">Pilih pelanggan</option><?php foreach ($customers as $customer): ?><option value="<?= e($customer['id']) ?>"><?= e($customer['customer_code'] . ' · ' . $customer['name']) ?></option><?php endforeach; ?></select></label>
+                <label>Periode<input type="month" name="billing_month" value="<?= e($defaultMonth) ?>" required></label>
+                <label>Nominal<input type="number" name="amount" min="1" step="1000" required></label>
+                <label>Jatuh tempo<input type="date" name="due_date" value="<?= e($defaultDueDate) ?>" required></label>
+                <div class="field-wide"><button class="button button-secondary" type="submit">Terbitkan manual</button></div>
+            </form>
+        </section>
+    <?php endif; ?>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Daftar tagihan</h2><p class="muted">Cari invoice atau pelanggan, lalu filter status dan periode.</p></div></div>
+        <form method="get" class="filter-form">
+            <label>Pencarian<input name="q" maxlength="80" value="<?= e($search) ?>" placeholder="Invoice atau pelanggan"></label>
+            <label>Status<select name="status"><option value="">Semua status</option><option value="unpaid"<?= $statusFilter === 'unpaid' ? ' selected' : '' ?>>Belum lunas</option><option value="overdue"<?= $statusFilter === 'overdue' ? ' selected' : '' ?>>Jatuh tempo</option><option value="paid"<?= $statusFilter === 'paid' ? ' selected' : '' ?>>Lunas</option><option value="cancelled"<?= $statusFilter === 'cancelled' ? ' selected' : '' ?>>Dibatalkan</option></select></label>
+            <label>Periode<input type="month" name="month" value="<?= e($monthFilter) ?>"></label>
+            <button class="button button-primary" type="submit">Terapkan</button>
+            <a class="button button-secondary" href="/invoices">Reset</a>
+        </form>
+        <div class="table-wrap">
+            <table><thead><tr><th>Invoice</th><th>Pelanggan</th><th>Periode</th><th>Sumber</th><th>Jatuh tempo</th><th>Nominal</th><th>Status</th><th>Aksi</th></tr></thead>
+                <tbody>
+                <?php if ($invoices === []): ?><tr><td colspan="8" class="muted">Belum ada tagihan yang sesuai.</td></tr><?php endif; ?>
+                <?php foreach ($invoices as $invoice): $overdue = $invoice['status'] === 'unpaid' && $invoice['due_date'] < date('Y-m-d'); ?>
+                    <tr>
+                        <td><strong><?= e($invoice['invoice_number']) ?></strong></td>
+                        <td><?= e($invoice['customer_code']) ?><small><?= e($invoice['customer_name']) ?></small></td>
+                        <td><?= e($invoice['period_label']) ?></td><td><span class="role-badge"><?= e($invoice['source']) ?></span></td>
+                        <td><?= e($invoice['due_date']) ?></td><td><?= e(rupiah($invoice['amount'])) ?></td>
+                        <td><span class="status status-<?= $overdue ? 'overdue' : e($invoice['status']) ?>"><?= $overdue ? 'overdue' : e($invoice['status']) ?></span></td>
+                        <td>
+                            <?php if ($invoice['status'] === 'unpaid' && Auth::canManageBilling()): ?>
+                                <div class="action-group">
+                                    <form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="pay"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>"><button class="button button-small" type="submit">Lunas</button></form>
+                                    <form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="cancel"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>"><button class="button button-danger" type="submit">Batalkan</button></form>
+                                </div>
+                            <?php else: ?>—<?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php View::pagination($pagination); ?>
+    </section>
     <?php
     View::footer();
     exit;

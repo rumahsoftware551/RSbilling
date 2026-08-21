@@ -55,4 +55,29 @@ final class View
 </html>
         <?php
     }
+
+    public static function pagination(Pagination $pagination): void
+    {
+        if ($pagination->total === 0) {
+            return;
+        }
+        ?>
+        <div class="pagination-wrap">
+            <span>Menampilkan <?= e($pagination->from()) ?>–<?= e($pagination->to()) ?> dari <?= e($pagination->total) ?></span>
+            <nav class="pagination" aria-label="Navigasi halaman">
+                <?php if ($pagination->page > 1): ?>
+                    <a href="<?= e($pagination->url($pagination->page - 1)) ?>">Sebelumnya</a>
+                <?php else: ?>
+                    <span class="is-disabled">Sebelumnya</span>
+                <?php endif; ?>
+                <strong><?= e($pagination->page) ?> / <?= e($pagination->totalPages) ?></strong>
+                <?php if ($pagination->page < $pagination->totalPages): ?>
+                    <a href="<?= e($pagination->url($pagination->page + 1)) ?>">Berikutnya</a>
+                <?php else: ?>
+                    <span class="is-disabled">Berikutnya</span>
+                <?php endif; ?>
+            </nav>
+        </div>
+        <?php
+    }
 }

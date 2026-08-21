@@ -15,7 +15,9 @@ Sudah tersedia:
 - menu pengelolaan pengguna tenant untuk owner/admin dengan pencegahan eskalasi role;
 - penggantian password mandiri dan kewajiban mengganti password sementara pada login pertama;
 - penonaktifan akses staf per ISP tanpa memengaruhi tenant lain;
-- master paket, pelanggan, penerbitan tagihan, dan pencatatan pembayaran manual;
+- master paket dan pelanggan dengan edit status, pencarian, filter, serta pagination;
+- penerbitan tagihan manual dan generator tagihan bulanan idempotent;
+- filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
 - runtime Docker dengan Nginx, PHP-FPM 8.3, dan MariaDB 11.4;
 - pemeriksaan keamanan otomatis di GitHub Actions.

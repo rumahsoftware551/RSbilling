@@ -27,12 +27,36 @@ $columnExists = static function (PDO $connection, string $table, string $column)
     return (int) $query->fetchColumn() > 0;
 };
 
+$indexExists = static function (PDO $connection, string $table, string $index): bool {
+    $query = $connection->prepare(
+        'SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name AND INDEX_NAME = :index_name'
+    );
+    $query->execute(['table_name' => $table, 'index_name' => $index]);
+    return (int) $query->fetchColumn() > 0;
+};
+
 if (!$columnExists($db, 'users', 'must_change_password')) {
     $db->exec("ALTER TABLE users ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0 AFTER status");
 }
 
 if (!$columnExists($db, 'tenant_users', 'status')) {
     $db->exec("ALTER TABLE tenant_users ADD COLUMN status ENUM('active', 'disabled') NOT NULL DEFAULT 'active' AFTER role");
+}
+
+if (!$columnExists($db, 'invoices', 'billing_period')) {
+    $db->exec("ALTER TABLE invoices ADD COLUMN billing_period DATE NULL AFTER period_label");
+}
+
+if (!$columnExists($db, 'invoices', 'source')) {
+    $db->exec("ALTER TABLE invoices ADD COLUMN source ENUM('manual', 'monthly') NOT NULL DEFAULT 'manual' AFTER due_date");
+}
+
+if (!$indexExists($db, 'invoices', 'invoices_tenant_customer_period_unique')) {
+    $db->exec(
+        'ALTER TABLE invoices ADD UNIQUE KEY invoices_tenant_customer_period_unique
+         (tenant_id, customer_id, billing_period)'
+    );
 }
 
 fwrite(STDOUT, "Database siap.\n");

@@ -98,6 +98,18 @@ function input(string $key, string $default = ''): string
     return is_string($value) ? trim($value) : $default;
 }
 
+function query_input(string $key, string $default = ''): string
+{
+    $value = $_GET[$key] ?? $default;
+    return is_string($value) ? trim($value) : $default;
+}
+
+function requested_page(): int
+{
+    $page = filter_var(query_input('page', '1'), FILTER_VALIDATE_INT);
+    return $page && $page > 0 ? $page : 1;
+}
+
 function rupiah(float|int|string $amount): string
 {
     return 'Rp ' . number_format((float) $amount, 0, ',', '.');
