@@ -9,6 +9,7 @@ require_once dirname(__DIR__) . '/app/CredentialVault.php';
 require_once dirname(__DIR__) . '/app/NetworkCommandService.php';
 require_once dirname(__DIR__) . '/app/NetworkDeviceService.php';
 require_once dirname(__DIR__) . '/app/NetworkDeviceSimulator.php';
+require_once dirname(__DIR__) . '/app/NetworkWorkerMonitor.php';
 require_once dirname(__DIR__) . '/app/NotificationService.php';
 require_once dirname(__DIR__) . '/app/PaymentReconciliationService.php';
 require_once dirname(__DIR__) . '/app/Pagination.php';
@@ -126,6 +127,13 @@ assert_operational(
         && NetworkCommandService::validateTarget('provision_preview', 'CUST-001') === 'CUST-001',
     'Target perintah wajib divalidasi sesuai jenis aksi.'
 );
+$workerKey = NetworkWorkerMonitor::keyForIdentity('primary');
+assert_operational(
+    preg_match('/^[a-f0-9]{64}$/', $workerKey) === 1
+        && $workerKey === NetworkWorkerMonitor::keyForIdentity('primary')
+        && $workerKey !== NetworkWorkerMonitor::keyForIdentity('secondary'),
+    'Identitas worker wajib diubah menjadi kunci heartbeat deterministik tanpa mengekspos hostname.'
+);
 
 $invalidDiscountRejected = false;
 try {
@@ -242,9 +250,17 @@ $installer = file_get_contents(dirname(__DIR__) . '/database/install.php') ?: ''
 $routes = file_get_contents(dirname(__DIR__) . '/public/index.php') ?: '';
 $networkDeviceSource = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceService.php') ?: '';
 $envExample = file_get_contents(dirname(__DIR__) . '/.env.example') ?: '';
+$compose = file_get_contents(dirname(__DIR__) . '/compose.yaml') ?: '';
+$dockerfile = file_get_contents(dirname(__DIR__) . '/docker/php/Dockerfile') ?: '';
+$entrypoint = file_get_contents(dirname(__DIR__) . '/docker/php/entrypoint.sh') ?: '';
+$networkWorkerDaemon = file_get_contents(dirname(__DIR__) . '/scripts/network_worker_daemon.php') ?: '';
+$networkWorkerHealth = file_get_contents(dirname(__DIR__) . '/scripts/network_worker_health.php') ?: '';
+$workerComposeMatched = preg_match('/  network-worker:\n(?<block>.*?)(?=\nvolumes:)/s', $compose, $workerComposeMatch) === 1;
+$workerCompose = $workerComposeMatched ? $workerComposeMatch['block'] : '';
 assert_operational(
-    str_contains($envExample, 'APP_TIMEZONE=Asia/Jakarta'),
-    'Zona waktu aplikasi harus memiliki default eksplisit.'
+    str_contains($envExample, 'APP_TIMEZONE=Asia/Jakarta')
+        && str_contains($envExample, 'NETWORK_WORKER_POLL_SECONDS=5'),
+    'Zona waktu dan interval worker harus memiliki default eksplisit.'
 );
 assert_operational(
     str_contains($schema, 'invoices_tenant_customer_period_unique'),
@@ -286,6 +302,26 @@ assert_operational(
         && str_contains($schema, "'retry_scheduled', 'dead_letter'")
         && str_contains($schema, 'result_payload TEXT NULL'),
     'Command queue wajib memiliki isolasi tenant, idempotensi, index worker, retry, dan dead-letter.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS network_worker_heartbeats')
+        && str_contains($schema, "status ENUM('starting', 'running', 'stopping', 'stopped', 'failed')")
+        && str_contains($schema, 'network_worker_heartbeats_status_seen_idx (status, last_seen_at)'),
+    'Heartbeat worker wajib memiliki status lifecycle dan index monitoring.'
+);
+assert_operational(
+    $workerComposeMatched
+        && str_contains($workerCompose, 'RSBILLING_SKIP_INSTALL: "1"')
+        && str_contains($workerCompose, 'read_only: true')
+        && str_contains($workerCompose, 'stop_grace_period: 20s')
+        && str_contains($workerCompose, 'network_worker_health.php')
+        && !str_contains($workerCompose, "\n    ports:")
+        && str_contains($dockerfile, 'docker-php-ext-install pdo_mysql pcntl')
+        && str_contains($entrypoint, 'RSBILLING_SKIP_INSTALL')
+        && str_contains($networkWorkerDaemon, 'pcntl_signal(SIGTERM')
+        && str_contains($networkWorkerDaemon, 'NetworkWorkerMonitor::beat(')
+        && str_contains($networkWorkerHealth, 'NetworkWorkerMonitor::isHealthy('),
+    'Worker permanen wajib tanpa port publik, memiliki heartbeat, healthcheck, PCNTL, dan graceful shutdown.'
 );
 assert_operational(
     str_contains($installer, "if (!\$columnExists(\$db, 'invoices', 'base_amount'))")
@@ -377,6 +413,13 @@ assert_operational(
         && str_contains($routes, 'Antrean perintah simulator')
         && str_contains($routes, 'Riwayat perintah'),
     'Command queue wajib memiliki enqueue, worker simulator, audit, dan UI operasional.'
+);
+assert_operational(
+    str_contains($routes, 'NetworkWorkerMonitor::recent($db, 5)')
+        && str_contains($routes, 'Worker otomatis sehat')
+        && str_contains($routes, 'Worker otomatis belum terdeteksi')
+        && str_contains($routes, 'Proses manual maksimal 10'),
+    'UI perangkat wajib menampilkan heartbeat worker dan menyediakan proses manual sebagai fallback.'
 );
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");

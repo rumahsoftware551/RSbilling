@@ -28,6 +28,13 @@ $networkDeviceService = file_get_contents(dirname(__DIR__) . '/app/NetworkDevice
 $networkCommandService = file_get_contents(dirname(__DIR__) . '/app/NetworkCommandService.php') ?: '';
 $networkSimulator = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceSimulator.php') ?: '';
 $networkWorker = file_get_contents(dirname(__DIR__) . '/scripts/network_worker.php') ?: '';
+$networkWorkerDaemon = file_get_contents(dirname(__DIR__) . '/scripts/network_worker_daemon.php') ?: '';
+$networkWorkerHealth = file_get_contents(dirname(__DIR__) . '/scripts/network_worker_health.php') ?: '';
+$networkWorkerMonitor = file_get_contents(dirname(__DIR__) . '/app/NetworkWorkerMonitor.php') ?: '';
+$compose = file_get_contents(dirname(__DIR__) . '/compose.yaml') ?: '';
+$entrypoint = file_get_contents(dirname(__DIR__) . '/docker/php/entrypoint.sh') ?: '';
+$workerComposeMatched = preg_match('/  network-worker:\n(?<block>.*?)(?=\nvolumes:)/s', $compose, $workerComposeMatch) === 1;
+$workerCompose = $workerComposeMatched ? $workerComposeMatch['block'] : '';
 
 expect(str_contains($auth, 'password_verify'), 'Login wajib memakai password_verify.');
 expect(str_contains($auth, 'session_regenerate_id(true)'), 'Login wajib meregenerasi session ID.');
@@ -109,6 +116,23 @@ expect(
         && str_contains($networkWorker, 'CredentialVault::fromEnvironment()')
         && !preg_match('/\b(curl_|fsockopen|stream_socket_client|socket_create|gethostbyname)\s*\(/', $networkCommandService . $networkWorker),
     'Worker simulator wajib memiliki retry/dead-letter tanpa primitive koneksi jaringan.'
+);
+expect(
+    $workerComposeMatched
+        && !str_contains($workerCompose, "\n    ports:")
+        && str_contains($workerCompose, 'read_only: true')
+        && str_contains($workerCompose, 'RSBILLING_SKIP_INSTALL: "1"')
+        && str_contains($entrypoint, 'if [ "${RSBILLING_SKIP_INSTALL:-0}" != "1" ]')
+        && str_contains($networkWorkerDaemon, 'NetworkCommandService::processDue($db, $vault, null')
+        && str_contains($networkWorkerDaemon, 'pcntl_signal(SIGTERM')
+        && str_contains($networkWorkerDaemon, 'pcntl_signal(SIGINT')
+        && str_contains($networkWorkerDaemon, 'detail secret tidak disimpan')
+        && str_contains($networkWorkerHealth, 'NetworkWorkerMonitor::isHealthy(')
+        && !preg_match(
+            '/\b(curl_|fsockopen|stream_socket_client|socket_create|gethostbyname)\s*\(/',
+            $networkWorkerDaemon . $networkWorkerHealth . $networkWorkerMonitor
+        ),
+    'Daemon worker wajib simulator-only, tanpa port/koneksi jaringan, dan tidak menyimpan detail secret.'
 );
 
 $paths = [dirname(__DIR__) . '/app', dirname(__DIR__) . '/public', dirname(__DIR__) . '/database'];

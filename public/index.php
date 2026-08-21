@@ -1222,6 +1222,12 @@ if ($path === '/network-devices' && $method === 'GET') {
         'suspend_preview' => 'Preview suspend',
         'reactivate_preview' => 'Preview reaktivasi',
     ];
+    $networkWorkers = NetworkWorkerMonitor::recent($db, 5);
+    $healthyNetworkWorkers = array_values(array_filter(
+        $networkWorkers,
+        static fn (array $worker): bool => (bool) $worker['healthy']
+    ));
+    $primaryNetworkWorker = $healthyNetworkWorkers[0] ?? ($networkWorkers[0] ?? null);
 
     View::header('Perangkat Jaringan');
     ?>
@@ -1276,12 +1282,30 @@ if ($path === '/network-devices' && $method === 'GET') {
                 <h2>Antrean perintah simulator</h2>
                 <p class="muted">Perintah memakai idempotensi, maksimal tiga percobaan, retry eksponensial, dan dead-letter. Tidak ada perubahan jaringan nyata.</p>
             </div>
-            <?php if ($vaultConfigured): ?>
-                <form method="post" action="/network-commands" class="inline-form">
-                    <?= csrf_field() ?><input type="hidden" name="_action" value="process">
-                    <button class="button button-secondary" type="submit">Proses maksimal 10</button>
-                </form>
-            <?php endif; ?>
+            <div class="worker-actions">
+                <?php if ($primaryNetworkWorker !== null && (bool) $primaryNetworkWorker['healthy']): ?>
+                    <div class="worker-monitor worker-monitor-healthy">
+                        <span class="status status-success">Worker otomatis sehat</span>
+                        <small>Heartbeat <?= e($primaryNetworkWorker['heartbeat_age_seconds']) ?> detik lalu · total <?= e($primaryNetworkWorker['total_processed']) ?> diproses</small>
+                    </div>
+                <?php elseif ($primaryNetworkWorker !== null): ?>
+                    <div class="worker-monitor worker-monitor-unhealthy">
+                        <span class="status status-failed">Worker otomatis belum sehat</span>
+                        <small>Status <?= e($primaryNetworkWorker['status']) ?> · heartbeat <?= e($primaryNetworkWorker['heartbeat_age_seconds']) ?> detik lalu</small>
+                    </div>
+                <?php else: ?>
+                    <div class="worker-monitor worker-monitor-unhealthy">
+                        <span class="status status-pending">Worker otomatis belum terdeteksi</span>
+                        <small>Pastikan service <code>network-worker</code> sudah berjalan.</small>
+                    </div>
+                <?php endif; ?>
+                <?php if ($vaultConfigured): ?>
+                    <form method="post" action="/network-commands" class="inline-form">
+                        <?= csrf_field() ?><input type="hidden" name="_action" value="process">
+                        <button class="button button-secondary" type="submit">Proses manual maksimal 10</button>
+                    </form>
+                <?php endif; ?>
+            </div>
         </div>
         <?php if ($activeSimulators !== []): ?>
             <form method="post" action="/network-commands" class="form-grid command-form">

@@ -26,6 +26,7 @@ Sudah tersedia:
 - rekonsiliasi pembayaran CSV dengan staging, exact-match invoice/nominal, posting atomik, serta pencegahan referensi duplikat;
 - credential vault perangkat jaringan terenkripsi per tenant dan simulator aman tanpa koneksi eksternal;
 - antrean perintah simulator tenant-safe dengan idempotensi, row lock, retry eksponensial, dead-letter, dan audit;
+- background worker antrean jaringan dengan heartbeat database, healthcheck container, restart policy, dan graceful shutdown;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
@@ -37,15 +38,27 @@ Source lama tetap berada di `netbill-master/` sebagai referensi migrasi. Konfigu
 Antrean notifikasi pada fase ini belum mengirim pesan ke provider eksternal. Pesan disimpan sebagai outbox internal sampai adapter WhatsApp/email, worker, dan kredensial tenant dikonfigurasi serta diuji.
 
 Antrean perangkat hanya mengeksekusi simulator. Worker menolak driver MikroTik, tidak membuka socket,
-dan tidak mengubah jaringan. Owner/admin dapat memproses maksimal 10 perintah dari UI. Untuk eksekusi
-satu kali dari terminal container gunakan:
+dan tidak mengubah jaringan. Service `network-worker` memproses antrean otomatis untuk seluruh tenant,
+menyimpan heartbeat operasional tanpa credential, dan tidak membuka port publik. Status heartbeat dapat
+dilihat owner/admin pada halaman Perangkat. Tombol proses manual tetap tersedia sebagai fallback.
+
+Periksa service otomatis dengan:
+
+```bash
+docker compose ps network-worker
+docker compose logs --tail=50 network-worker
+```
+
+Untuk eksekusi satu kali dari terminal container gunakan:
 
 ```bash
 docker compose exec app php scripts/network_worker.php
 ```
 
-Nilai opsional `NETWORK_WORKER_LIMIT` membatasi 1–50 pekerjaan per eksekusi. Jangan menjalankan worker
-sebagai loop permanen sebelum monitoring, restart policy worker, dan UAT tenant selesai.
+`NETWORK_WORKER_LIMIT` membatasi 1–50 pekerjaan per batch dan `NETWORK_WORKER_POLL_SECONDS` mengatur
+interval polling 1–30 detik. Container diberi waktu 20 detik untuk menyelesaikan batch dan menulis status
+`stopped` ketika menerima SIGTERM/SIGINT. Integrasi MikroTik nyata tetap belum aktif dan memerlukan UAT
+terpisah sebelum credential atau jaringan produksi digunakan.
 
 ## Menjalankan secara lokal
 

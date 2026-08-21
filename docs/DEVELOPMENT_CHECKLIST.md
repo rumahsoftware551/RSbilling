@@ -50,7 +50,7 @@ Checklist ini diperbarui setiap kali satu milestone selesai dan telah melewati p
 - [ ] integrasi MikroTik API
 - [ ] FreeRADIUS dan proyeksi `radcheck`/`radreply`
 - [ ] suspend, disconnect, dan reaktivasi idempotent
-- [ ] background worker permanen dengan monitoring dan graceful shutdown
+- [x] background worker permanen dengan heartbeat, healthcheck, restart policy, dan graceful shutdown
 
 ## Fase 4 — SaaS komersial
 

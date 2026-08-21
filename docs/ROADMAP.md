@@ -44,7 +44,7 @@ Status: sedang dikerjakan pada branch `codex/security-runtime-hardening`.
 - integrasi MikroTik API nyata;
 - FreeRADIUS dan proyeksi `radcheck`/`radreply`;
 - suspend, disconnect, pembayaran, dan reaktivasi idempotent;
-- background worker permanen dengan monitoring serta graceful shutdown;
+- [x] background worker permanen dengan heartbeat, healthcheck, restart policy, dan graceful shutdown;
 - simulasi perangkat untuk test tanpa menyentuh jaringan produksi.
 
 ## Fase 4 — SaaS komersial

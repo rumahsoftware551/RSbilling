@@ -255,6 +255,21 @@ CREATE TABLE IF NOT EXISTS network_commands (
     CONSTRAINT network_commands_created_user_fk FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS network_worker_heartbeats (
+    worker_key CHAR(64) NOT NULL,
+    status ENUM('starting', 'running', 'stopping', 'stopped', 'failed') NOT NULL DEFAULT 'starting',
+    last_seen_at DATETIME NOT NULL,
+    last_batch_processed SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    total_processed BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    last_error VARCHAR(190) NULL,
+    started_at DATETIME NOT NULL,
+    stopped_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (worker_key),
+    KEY network_worker_heartbeats_status_seen_idx (status, last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     tenant_id BIGINT UNSIGNED NOT NULL,
