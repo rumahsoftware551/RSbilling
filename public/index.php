@@ -286,10 +286,57 @@ if ($path === '/customers' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
     $action = input('_action', 'create');
-    if (!in_array($action, ['create', 'update'], true)) {
+    if (!in_array($action, ['create', 'update', 'archive'], true)) {
         flash('error', 'Aksi pelanggan tidak dikenali.');
         redirect('/customers');
     }
+
+    if ($action === 'archive') {
+        $customerId = filter_var(input('customer_id'), FILTER_VALIDATE_INT);
+        if (!$customerId) {
+            flash('error', 'Pelanggan tidak valid.');
+            redirect('/customers');
+        }
+
+        $db->beginTransaction();
+        try {
+            $target = $db->prepare(
+                'SELECT id, customer_code, status FROM customers
+                 WHERE id = :id AND tenant_id = :tenant_id FOR UPDATE'
+            );
+            $target->execute(['id' => $customerId, 'tenant_id' => $tenantId]);
+            $customer = $target->fetch();
+            if (!$customer) {
+                throw new DomainException('Pelanggan tidak ditemukan pada ISP ini.');
+            }
+            if ($customer['status'] === 'terminated') {
+                throw new DomainException('Pelanggan tersebut sudah diarsipkan.');
+            }
+
+            $update = $db->prepare(
+                "UPDATE customers SET status = 'terminated'
+                 WHERE id = :id AND tenant_id = :tenant_id"
+            );
+            $update->execute(['id' => $customerId, 'tenant_id' => $tenantId]);
+            audit_event($db, 'customer.archived', 'customer', (int) $customerId, [
+                'code' => $customer['customer_code'],
+                'previous_status' => $customer['status'],
+            ]);
+            $db->commit();
+            flash('success', 'Pelanggan berhasil diarsipkan. Invoice dan pembayaran lama tetap tersimpan.');
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof DomainException) {
+                flash('error', $exception->getMessage());
+            } else {
+                throw $exception;
+            }
+        }
+        redirect('/customers');
+    }
+
     $customerId = filter_var(input('customer_id'), FILTER_VALIDATE_INT);
     $code = strtoupper(input('customer_code'));
     $name = input('name');
@@ -385,10 +432,54 @@ if ($path === '/plans' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
     $action = input('_action', 'create');
-    if (!in_array($action, ['create', 'update'], true)) {
+    if (!in_array($action, ['create', 'update', 'archive'], true)) {
         flash('error', 'Aksi paket tidak dikenali.');
         redirect('/plans');
     }
+
+    if ($action === 'archive') {
+        $planId = filter_var(input('plan_id'), FILTER_VALIDATE_INT);
+        if (!$planId) {
+            flash('error', 'Paket tidak valid.');
+            redirect('/plans');
+        }
+
+        $db->beginTransaction();
+        try {
+            $target = $db->prepare(
+                'SELECT id, code, status FROM plans
+                 WHERE id = :id AND tenant_id = :tenant_id FOR UPDATE'
+            );
+            $target->execute(['id' => $planId, 'tenant_id' => $tenantId]);
+            $plan = $target->fetch();
+            if (!$plan) {
+                throw new DomainException('Paket tidak ditemukan pada ISP ini.');
+            }
+            if ($plan['status'] === 'inactive') {
+                throw new DomainException('Paket tersebut sudah nonaktif atau diarsipkan.');
+            }
+
+            $update = $db->prepare(
+                "UPDATE plans SET status = 'inactive'
+                 WHERE id = :id AND tenant_id = :tenant_id"
+            );
+            $update->execute(['id' => $planId, 'tenant_id' => $tenantId]);
+            audit_event($db, 'plan.archived', 'plan', (int) $planId, ['code' => $plan['code']]);
+            $db->commit();
+            flash('success', 'Paket berhasil diarsipkan. Pelanggan dan histori tagihan tidak dihapus.');
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof DomainException) {
+                flash('error', $exception->getMessage());
+            } else {
+                throw $exception;
+            }
+        }
+        redirect('/plans');
+    }
+
     $planId = filter_var(input('plan_id'), FILTER_VALIDATE_INT);
     $code = strtoupper(input('code'));
     $name = input('name');
@@ -813,6 +904,187 @@ if ($path === '/') {
     exit;
 }
 
+if ($path === '/customers/view') {
+    $customerId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
+    if (!$customerId) {
+        flash('error', 'Pelanggan tidak valid.');
+        redirect('/customers');
+    }
+
+    $customerQuery = $db->prepare(
+        'SELECT c.id, c.customer_code, c.name, c.phone, c.email, c.address, c.status,
+                c.created_at, c.updated_at, p.id AS plan_id, p.code AS plan_code,
+                p.name AS plan_name, p.speed_label, p.price AS plan_price, p.status AS plan_status
+         FROM customers c
+         LEFT JOIN plans p ON p.id = c.plan_id AND p.tenant_id = c.tenant_id
+         WHERE c.id = :id AND c.tenant_id = :tenant_id LIMIT 1'
+    );
+    $customerQuery->execute(['id' => $customerId, 'tenant_id' => $tenantId]);
+    $customer = $customerQuery->fetch();
+    if (!$customer) {
+        flash('error', 'Pelanggan tidak ditemukan pada ISP ini.');
+        redirect('/customers');
+    }
+
+    $summaryQuery = $db->prepare(
+        "SELECT COUNT(*) AS invoice_count,
+                COALESCE(SUM(CASE WHEN status = 'unpaid' THEN amount ELSE 0 END), 0) AS outstanding,
+                COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0) AS paid_total,
+                MAX(created_at) AS last_invoice_at
+         FROM invoices WHERE customer_id = :customer_id AND tenant_id = :tenant_id"
+    );
+    $summaryQuery->execute(['customer_id' => $customerId, 'tenant_id' => $tenantId]);
+    $summary = $summaryQuery->fetch() ?: [];
+
+    $invoiceQuery = $db->prepare(
+        'SELECT id, invoice_number, period_label, amount, due_date, source, status, created_at
+         FROM invoices WHERE customer_id = :customer_id AND tenant_id = :tenant_id
+         ORDER BY id DESC LIMIT 20'
+    );
+    $invoiceQuery->execute(['customer_id' => $customerId, 'tenant_id' => $tenantId]);
+    $customerInvoices = $invoiceQuery->fetchAll();
+
+    $historyQuery = $db->prepare(
+        "SELECT a.action, a.metadata_json, a.created_at, u.name AS actor_name
+         FROM audit_logs a INNER JOIN users u ON u.id = a.user_id
+         WHERE a.tenant_id = :tenant_id AND a.entity_type = 'customer' AND a.entity_id = :customer_id
+         ORDER BY a.id DESC LIMIT 20"
+    );
+    $historyQuery->execute(['tenant_id' => $tenantId, 'customer_id' => $customerId]);
+    $customerHistory = $historyQuery->fetchAll();
+
+    View::header('Detail Pelanggan');
+    ?>
+    <div class="page-heading">
+        <div>
+            <p class="eyebrow">Detail pelanggan</p>
+            <h1><?= e($customer['customer_code'] . ' · ' . $customer['name']) ?></h1>
+            <span class="status status-<?= e($customer['status']) ?>"><?= e($customer['status']) ?></span>
+        </div>
+        <div class="action-group">
+            <?php if (Auth::canManageBilling()): ?>
+                <a class="button button-secondary" href="/customers/edit?id=<?= e($customer['id']) ?>">Edit</a>
+                <?php if ($customer['status'] !== 'terminated'): ?>
+                    <a class="button button-danger" href="/customers/archive?id=<?= e($customer['id']) ?>">Arsipkan</a>
+                <?php endif; ?>
+            <?php endif; ?>
+            <a class="button button-link" href="/customers">Kembali</a>
+        </div>
+    </div>
+    <section class="stat-grid">
+        <article class="stat-card"><span>Total invoice</span><strong><?= e($summary['invoice_count'] ?? 0) ?></strong><small>Seluruh periode</small></article>
+        <article class="stat-card"><span>Piutang</span><strong><?= e(rupiah($summary['outstanding'] ?? 0)) ?></strong><small>Invoice belum lunas</small></article>
+        <article class="stat-card"><span>Sudah dibayar</span><strong><?= e(rupiah($summary['paid_total'] ?? 0)) ?></strong><small>Akumulasi pembayaran</small></article>
+        <article class="stat-card"><span>Invoice terakhir</span><strong class="stat-date"><?= e($summary['last_invoice_at'] ?: '—') ?></strong><small>Waktu penerbitan</small></article>
+    </section>
+    <section class="account-grid detail-grid">
+        <article class="panel">
+            <h2>Kontak dan alamat</h2>
+            <dl class="detail-list">
+                <div><dt>WhatsApp</dt><dd><?= e($customer['phone'] ?: '—') ?></dd></div>
+                <div><dt>Email</dt><dd><?= e($customer['email'] ?: '—') ?></dd></div>
+                <div><dt>Alamat</dt><dd><?= nl2br(e($customer['address'] ?: '—')) ?></dd></div>
+            </dl>
+        </article>
+        <article class="panel">
+            <h2>Layanan saat ini</h2>
+            <dl class="detail-list">
+                <div><dt>Paket</dt><dd><?= e($customer['plan_name'] ?: 'Belum ditentukan') ?></dd></div>
+                <div><dt>Kecepatan</dt><dd><?= e($customer['speed_label'] ?: '—') ?></dd></div>
+                <div><dt>Harga bulanan</dt><dd><?= e($customer['plan_price'] !== null ? rupiah($customer['plan_price']) : '—') ?></dd></div>
+                <div><dt>Dibuat</dt><dd><?= e($customer['created_at']) ?></dd></div>
+                <div><dt>Terakhir diperbarui</dt><dd><?= e($customer['updated_at']) ?></dd></div>
+            </dl>
+        </article>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Histori tagihan</h2><p class="muted">Maksimal 20 invoice terbaru pelanggan ini.</p></div></div>
+        <div class="table-wrap">
+            <table><thead><tr><th>Invoice</th><th>Periode</th><th>Jatuh tempo</th><th>Nominal</th><th>Status</th></tr></thead><tbody>
+                <?php if ($customerInvoices === []): ?><tr><td colspan="5" class="muted">Belum ada invoice.</td></tr><?php endif; ?>
+                <?php foreach ($customerInvoices as $invoice): $overdue = $invoice['status'] === 'unpaid' && $invoice['due_date'] < date('Y-m-d'); ?>
+                    <tr>
+                        <td><a class="table-link" href="/invoices/view?id=<?= e($invoice['id']) ?>"><strong><?= e($invoice['invoice_number']) ?></strong></a><small><?= e($invoice['source']) ?></small></td>
+                        <td><?= e($invoice['period_label']) ?></td><td><?= e($invoice['due_date']) ?></td>
+                        <td><?= e(rupiah($invoice['amount'])) ?></td>
+                        <td><span class="status status-<?= $overdue ? 'overdue' : e($invoice['status']) ?>"><?= $overdue ? 'overdue' : e($invoice['status']) ?></span></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Histori perubahan</h2><p class="muted">Aktivitas penting yang tercatat pada audit log.</p></div></div>
+        <div class="table-wrap">
+            <table><thead><tr><th>Waktu</th><th>Aktivitas</th><th>Oleh</th></tr></thead><tbody>
+                <?php if ($customerHistory === []): ?><tr><td colspan="3" class="muted">Belum ada histori perubahan.</td></tr><?php endif; ?>
+                <?php foreach ($customerHistory as $history): ?>
+                    <tr><td><?= e($history['created_at']) ?></td><td><?= e($history['action']) ?></td><td><?= e($history['actor_name']) ?></td></tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
+if ($path === '/customers/archive') {
+    Auth::requireBillingAccess();
+    $customerId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
+    if (!$customerId) {
+        flash('error', 'Pelanggan tidak valid.');
+        redirect('/customers');
+    }
+
+    $customerQuery = $db->prepare(
+        'SELECT id, customer_code, name, status FROM customers
+         WHERE id = :id AND tenant_id = :tenant_id LIMIT 1'
+    );
+    $customerQuery->execute(['id' => $customerId, 'tenant_id' => $tenantId]);
+    $customer = $customerQuery->fetch();
+    if (!$customer) {
+        flash('error', 'Pelanggan tidak ditemukan pada ISP ini.');
+        redirect('/customers');
+    }
+    if ($customer['status'] === 'terminated') {
+        flash('error', 'Pelanggan tersebut sudah diarsipkan.');
+        redirect('/customers/view?id=' . $customerId);
+    }
+
+    $invoiceSummary = $db->prepare(
+        "SELECT COUNT(*) AS invoice_count,
+                COALESCE(SUM(CASE WHEN status = 'unpaid' THEN amount ELSE 0 END), 0) AS outstanding
+         FROM invoices WHERE customer_id = :customer_id AND tenant_id = :tenant_id"
+    );
+    $invoiceSummary->execute(['customer_id' => $customerId, 'tenant_id' => $tenantId]);
+    $summary = $invoiceSummary->fetch() ?: [];
+
+    View::header('Arsipkan Pelanggan');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Konfirmasi aman</p><h1>Arsipkan pelanggan</h1></div>
+        <a class="button button-secondary" href="/customers/view?id=<?= e($customer['id']) ?>">Batal</a>
+    </div>
+    <section class="panel danger-zone">
+        <h2><?= e($customer['customer_code'] . ' · ' . $customer['name']) ?></h2>
+        <p>Status pelanggan akan menjadi <strong>terminated</strong>. Pelanggan tidak akan menerima tagihan baru, tetapi seluruh invoice, pembayaran, dan audit log lama tetap tersimpan.</p>
+        <dl class="detail-list archive-summary">
+            <div><dt>Total invoice tersimpan</dt><dd><?= e($summary['invoice_count'] ?? 0) ?></dd></div>
+            <div><dt>Piutang yang tetap tercatat</dt><dd><?= e(rupiah($summary['outstanding'] ?? 0)) ?></dd></div>
+        </dl>
+        <form method="post" action="/customers" class="confirm-form">
+            <?= csrf_field() ?>
+            <input type="hidden" name="_action" value="archive">
+            <input type="hidden" name="customer_id" value="<?= e($customer['id']) ?>">
+            <button class="button button-danger" type="submit">Ya, arsipkan pelanggan</button>
+        </form>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
 if ($path === '/customers/edit') {
     Auth::requireBillingAccess();
     $customerId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
@@ -840,7 +1112,10 @@ if ($path === '/customers/edit') {
     ?>
     <div class="page-heading">
         <div><p class="eyebrow">Master data</p><h1>Edit pelanggan</h1></div>
-        <a class="button button-secondary" href="/customers">Kembali</a>
+        <div class="action-group">
+            <?php if ($customer['status'] !== 'terminated'): ?><a class="button button-danger" href="/customers/archive?id=<?= e($customer['id']) ?>">Arsipkan</a><?php endif; ?>
+            <a class="button button-secondary" href="/customers/view?id=<?= e($customer['id']) ?>">Kembali</a>
+        </div>
     </div>
     <section class="panel">
         <form method="post" action="/customers" class="form-grid">
@@ -898,7 +1173,10 @@ if ($path === '/plans/edit') {
     ?>
     <div class="page-heading">
         <div><p class="eyebrow">Produk layanan</p><h1>Edit paket</h1></div>
-        <a class="button button-secondary" href="/plans">Kembali</a>
+        <div class="action-group">
+            <?php if ($plan['status'] === 'active'): ?><a class="button button-danger" href="/plans/archive?id=<?= e($plan['id']) ?>">Arsipkan</a><?php endif; ?>
+            <a class="button button-secondary" href="/plans">Kembali</a>
+        </div>
     </div>
     <section class="panel">
         <form method="post" action="/plans" class="form-grid">
@@ -916,6 +1194,63 @@ if ($path === '/plans/edit') {
                 </select>
             </label>
             <div class="field-wide"><button class="button button-primary" type="submit">Simpan perubahan</button></div>
+        </form>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
+if ($path === '/plans/archive') {
+    Auth::requireBillingAccess();
+    $planId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
+    if (!$planId) {
+        flash('error', 'Paket tidak valid.');
+        redirect('/plans');
+    }
+
+    $planQuery = $db->prepare(
+        'SELECT id, code, name, speed_label, price, status FROM plans
+         WHERE id = :id AND tenant_id = :tenant_id LIMIT 1'
+    );
+    $planQuery->execute(['id' => $planId, 'tenant_id' => $tenantId]);
+    $plan = $planQuery->fetch();
+    if (!$plan) {
+        flash('error', 'Paket tidak ditemukan pada ISP ini.');
+        redirect('/plans');
+    }
+    if ($plan['status'] === 'inactive') {
+        flash('error', 'Paket tersebut sudah nonaktif atau diarsipkan.');
+        redirect('/plans/edit?id=' . $planId);
+    }
+
+    $customerSummary = $db->prepare(
+        "SELECT COUNT(*) AS customer_count,
+                COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active_count
+         FROM customers WHERE plan_id = :plan_id AND tenant_id = :tenant_id"
+    );
+    $customerSummary->execute(['plan_id' => $planId, 'tenant_id' => $tenantId]);
+    $summary = $customerSummary->fetch() ?: [];
+
+    View::header('Arsipkan Paket');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Konfirmasi aman</p><h1>Arsipkan paket</h1></div>
+        <a class="button button-secondary" href="/plans/edit?id=<?= e($plan['id']) ?>">Batal</a>
+    </div>
+    <section class="panel danger-zone">
+        <h2><?= e($plan['code'] . ' · ' . $plan['name']) ?></h2>
+        <p>Paket akan menjadi <strong>inactive</strong> dan tidak dipakai generator tagihan berikutnya. Relasi pelanggan serta histori invoice tetap tersimpan.</p>
+        <dl class="detail-list archive-summary">
+            <div><dt>Total pelanggan pada paket</dt><dd><?= e($summary['customer_count'] ?? 0) ?></dd></div>
+            <div><dt>Pelanggan aktif terdampak</dt><dd><?= e($summary['active_count'] ?? 0) ?></dd></div>
+            <div><dt>Harga terakhir</dt><dd><?= e(rupiah($plan['price'])) ?></dd></div>
+        </dl>
+        <form method="post" action="/plans" class="confirm-form">
+            <?= csrf_field() ?>
+            <input type="hidden" name="_action" value="archive">
+            <input type="hidden" name="plan_id" value="<?= e($plan['id']) ?>">
+            <button class="button button-danger" type="submit">Ya, arsipkan paket</button>
         </form>
     </section>
     <?php
@@ -993,12 +1328,12 @@ if ($path === '/customers') {
                 <?php if ($customers === []): ?><tr><td colspan="6" class="muted">Belum ada pelanggan yang sesuai.</td></tr><?php endif; ?>
                 <?php foreach ($customers as $customer): ?>
                     <tr>
-                        <td><strong><?= e($customer['customer_code']) ?></strong></td>
+                        <td><a class="table-link" href="/customers/view?id=<?= e($customer['id']) ?>"><strong><?= e($customer['customer_code']) ?></strong></a></td>
                         <td><?= e($customer['name']) ?></td>
                         <td><?= e($customer['plan_name'] ?? '—') ?><small><?= e($customer['speed_label'] ?? '') ?></small></td>
                         <td><?= e($customer['phone'] ?: '—') ?><small><?= e($customer['email'] ?: '') ?></small></td>
                         <td><span class="status status-<?= e($customer['status']) ?>"><?= e($customer['status']) ?></span></td>
-                        <td><?php if (Auth::canManageBilling()): ?><a class="button button-link" href="/customers/edit?id=<?= e($customer['id']) ?>">Edit</a><?php else: ?>—<?php endif; ?></td>
+                        <td><div class="action-group"><a class="button button-link" href="/customers/view?id=<?= e($customer['id']) ?>">Detail</a><?php if (Auth::canManageBilling()): ?><a class="button button-link" href="/customers/edit?id=<?= e($customer['id']) ?>">Edit</a><?php endif; ?></div></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -1075,13 +1410,129 @@ if ($path === '/plans') {
                         <td><strong><?= e($plan['code']) ?></strong></td><td><?= e($plan['name']) ?></td>
                         <td><?= e($plan['speed_label']) ?></td><td><?= e(rupiah($plan['price'])) ?></td>
                         <td><span class="status status-<?= e($plan['status']) ?>"><?= e($plan['status']) ?></span></td>
-                        <td><?php if (Auth::canManageBilling()): ?><a class="button button-link" href="/plans/edit?id=<?= e($plan['id']) ?>">Edit</a><?php else: ?>—<?php endif; ?></td>
+                        <td><?php if (Auth::canManageBilling()): ?><div class="action-group"><a class="button button-link" href="/plans/edit?id=<?= e($plan['id']) ?>">Edit</a><?php if ($plan['status'] === 'active'): ?><a class="button button-danger" href="/plans/archive?id=<?= e($plan['id']) ?>">Arsipkan</a><?php endif; ?></div><?php else: ?>—<?php endif; ?></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
             </table>
         </div>
         <?php View::pagination($pagination); ?>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
+if ($path === '/invoices/view') {
+    $invoiceId = filter_var(query_input('id'), FILTER_VALIDATE_INT);
+    if (!$invoiceId) {
+        flash('error', 'Invoice tidak valid.');
+        redirect('/invoices');
+    }
+
+    $invoiceQuery = $db->prepare(
+        'SELECT i.id, i.invoice_number, i.period_label, i.billing_period, i.amount, i.due_date,
+                i.source, i.status, i.paid_at, i.created_at, i.updated_at,
+                c.id AS customer_id, c.customer_code, c.name AS customer_name, c.phone,
+                c.email, c.status AS customer_status, p.name AS plan_name, p.speed_label
+         FROM invoices i
+         INNER JOIN customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+         LEFT JOIN plans p ON p.id = c.plan_id AND p.tenant_id = c.tenant_id
+         WHERE i.id = :id AND i.tenant_id = :tenant_id LIMIT 1'
+    );
+    $invoiceQuery->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
+    $invoice = $invoiceQuery->fetch();
+    if (!$invoice) {
+        flash('error', 'Invoice tidak ditemukan pada ISP ini.');
+        redirect('/invoices');
+    }
+
+    $paymentsQuery = $db->prepare(
+        'SELECT p.id, p.amount, p.method, p.reference_number, p.paid_at, u.name AS recorded_by_name
+         FROM payments p INNER JOIN users u ON u.id = p.recorded_by
+         WHERE p.invoice_id = :invoice_id AND p.tenant_id = :tenant_id
+         ORDER BY p.id DESC'
+    );
+    $paymentsQuery->execute(['invoice_id' => $invoiceId, 'tenant_id' => $tenantId]);
+    $invoicePayments = $paymentsQuery->fetchAll();
+
+    $historyQuery = $db->prepare(
+        "SELECT a.action, a.metadata_json, a.created_at, u.name AS actor_name
+         FROM audit_logs a INNER JOIN users u ON u.id = a.user_id
+         WHERE a.tenant_id = :tenant_id AND a.entity_type = 'invoice' AND a.entity_id = :invoice_id
+         ORDER BY a.id DESC LIMIT 30"
+    );
+    $historyQuery->execute(['tenant_id' => $tenantId, 'invoice_id' => $invoiceId]);
+    $invoiceHistory = $historyQuery->fetchAll();
+    $overdue = $invoice['status'] === 'unpaid' && $invoice['due_date'] < date('Y-m-d');
+
+    View::header('Detail Invoice');
+    ?>
+    <div class="page-heading">
+        <div>
+            <p class="eyebrow">Detail invoice</p>
+            <h1><?= e($invoice['invoice_number']) ?></h1>
+            <span class="status status-<?= $overdue ? 'overdue' : e($invoice['status']) ?>"><?= $overdue ? 'overdue' : e($invoice['status']) ?></span>
+        </div>
+        <div class="action-group">
+            <?php if ($invoice['status'] === 'unpaid' && Auth::canManageBilling()): ?>
+                <form method="post" action="/invoices" class="inline-form">
+                    <?= csrf_field() ?><input type="hidden" name="_action" value="pay"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>">
+                    <button class="button button-small" type="submit">Tandai lunas</button>
+                </form>
+                <form method="post" action="/invoices" class="inline-form">
+                    <?= csrf_field() ?><input type="hidden" name="_action" value="cancel"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>">
+                    <button class="button button-danger" type="submit">Batalkan</button>
+                </form>
+            <?php endif; ?>
+            <a class="button button-link" href="/invoices">Kembali</a>
+        </div>
+    </div>
+    <section class="account-grid detail-grid">
+        <article class="panel">
+            <h2>Informasi tagihan</h2>
+            <dl class="detail-list">
+                <div><dt>Periode</dt><dd><?= e($invoice['period_label']) ?></dd></div>
+                <div><dt>Nominal</dt><dd><?= e(rupiah($invoice['amount'])) ?></dd></div>
+                <div><dt>Jatuh tempo</dt><dd><?= e($invoice['due_date']) ?></dd></div>
+                <div><dt>Sumber</dt><dd><span class="role-badge"><?= e($invoice['source']) ?></span></dd></div>
+                <div><dt>Dibuat</dt><dd><?= e($invoice['created_at']) ?></dd></div>
+                <div><dt>Dibayar</dt><dd><?= e($invoice['paid_at'] ?: '—') ?></dd></div>
+            </dl>
+        </article>
+        <article class="panel">
+            <h2>Pelanggan</h2>
+            <dl class="detail-list">
+                <div><dt>Kode</dt><dd><a class="table-link" href="/customers/view?id=<?= e($invoice['customer_id']) ?>"><?= e($invoice['customer_code']) ?></a></dd></div>
+                <div><dt>Nama</dt><dd><?= e($invoice['customer_name']) ?></dd></div>
+                <div><dt>WhatsApp</dt><dd><?= e($invoice['phone'] ?: '—') ?></dd></div>
+                <div><dt>Email</dt><dd><?= e($invoice['email'] ?: '—') ?></dd></div>
+                <div><dt>Paket</dt><dd><?= e($invoice['plan_name'] ?: '—') ?><small><?= e($invoice['speed_label'] ?: '') ?></small></dd></div>
+                <div><dt>Status pelanggan</dt><dd><span class="status status-<?= e($invoice['customer_status']) ?>"><?= e($invoice['customer_status']) ?></span></dd></div>
+            </dl>
+        </article>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Histori pembayaran</h2><p class="muted">Semua pencatatan pembayaran untuk invoice ini.</p></div></div>
+        <div class="table-wrap">
+            <table><thead><tr><th>Waktu</th><th>Nominal</th><th>Metode</th><th>Referensi</th><th>Dicatat oleh</th></tr></thead><tbody>
+                <?php if ($invoicePayments === []): ?><tr><td colspan="5" class="muted">Belum ada pembayaran.</td></tr><?php endif; ?>
+                <?php foreach ($invoicePayments as $payment): ?>
+                    <tr><td><?= e($payment['paid_at']) ?></td><td><?= e(rupiah($payment['amount'])) ?></td><td><?= e($payment['method']) ?></td><td><?= e($payment['reference_number'] ?: '—') ?></td><td><?= e($payment['recorded_by_name']) ?></td></tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Audit invoice</h2><p class="muted">Penerbitan, pembayaran, dan pembatalan yang tercatat.</p></div></div>
+        <div class="table-wrap">
+            <table><thead><tr><th>Waktu</th><th>Aktivitas</th><th>Oleh</th></tr></thead><tbody>
+                <?php if ($invoiceHistory === []): ?><tr><td colspan="3" class="muted">Belum ada audit invoice.</td></tr><?php endif; ?>
+                <?php foreach ($invoiceHistory as $history): ?>
+                    <tr><td><?= e($history['created_at']) ?></td><td><?= e($history['action']) ?></td><td><?= e($history['actor_name']) ?></td></tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
     </section>
     <?php
     View::footer();
@@ -1181,7 +1632,7 @@ if ($path === '/invoices') {
                 <?php if ($invoices === []): ?><tr><td colspan="8" class="muted">Belum ada tagihan yang sesuai.</td></tr><?php endif; ?>
                 <?php foreach ($invoices as $invoice): $overdue = $invoice['status'] === 'unpaid' && $invoice['due_date'] < date('Y-m-d'); ?>
                     <tr>
-                        <td><strong><?= e($invoice['invoice_number']) ?></strong></td>
+                        <td><a class="table-link" href="/invoices/view?id=<?= e($invoice['id']) ?>"><strong><?= e($invoice['invoice_number']) ?></strong></a></td>
                         <td><?= e($invoice['customer_code']) ?><small><?= e($invoice['customer_name']) ?></small></td>
                         <td><?= e($invoice['period_label']) ?></td><td><span class="role-badge"><?= e($invoice['source']) ?></span></td>
                         <td><?= e($invoice['due_date']) ?></td><td><?= e(rupiah($invoice['amount'])) ?></td>

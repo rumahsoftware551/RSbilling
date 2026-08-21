@@ -40,5 +40,23 @@ assert_operational(
     str_contains($routes, "WHERE id = :id AND tenant_id = :tenant_id"),
     'Update master data wajib dibatasi tenant aktif.'
 );
+assert_operational(
+    str_contains($routes, "if (\$path === '/customers/view')")
+        && str_contains($routes, "if (\$path === '/invoices/view')"),
+    'Halaman detail pelanggan dan invoice wajib tersedia.'
+);
+assert_operational(
+    str_contains($routes, "audit_event(\$db, 'customer.archived'")
+        && str_contains($routes, "audit_event(\$db, 'plan.archived'"),
+    'Arsip pelanggan dan paket wajib masuk audit log.'
+);
+assert_operational(
+    !str_contains($routes, 'DELETE FROM customers') && !str_contains($routes, 'DELETE FROM plans'),
+    'Master data tidak boleh dihapus permanen melalui route operasional.'
+);
+assert_operational(
+    str_contains($routes, 'p.invoice_id = :invoice_id AND p.tenant_id = :tenant_id'),
+    'Histori pembayaran wajib dibatasi invoice dan tenant aktif.'
+);
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");

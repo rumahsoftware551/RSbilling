@@ -27,7 +27,7 @@ Status: sedang dikerjakan pada branch `codex/security-runtime-hardening`.
 - [x] edit/status paket dan pelanggan dengan pencarian, filter, serta pagination;
 - [x] generator tagihan bulanan idempotent;
 - [x] filter periode/status dan pembatalan tagihan belum dibayar;
-- [ ] detail histori dan penghapusan data yang aman;
+- [x] detail pelanggan/invoice, histori pembayaran, dan arsip data yang aman;
 - pajak, diskon, prorata, denda, dan invoice PDF;
 - notifikasi WhatsApp/email dengan antrean;
 - rekonsiliasi pembayaran dan laporan kas;

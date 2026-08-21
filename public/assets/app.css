@@ -87,9 +87,18 @@ td small { display: block; margin-top: .2rem; color: var(--muted); }
 .action-group { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
 .button-danger { min-height: 32px; padding: .4rem .7rem; color: var(--danger); background: #fff0f1; }
 .button-link { min-height: 32px; padding: .4rem .7rem; color: var(--blue); background: #eaf1ff; }
+.table-link { color: var(--blue); text-decoration: none; }
+.table-link:hover { text-decoration: underline; }
 .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
 .section-heading h2 { margin-bottom: .25rem; }
 .section-heading p { margin-bottom: 0; }
+.detail-grid { margin-bottom: 1.2rem; }
+.detail-grid .panel { height: 100%; }
+.stat-date { font-size: 1rem !important; letter-spacing: 0 !important; overflow-wrap: anywhere; }
+.danger-zone { border-color: #f3c5ca; background: #fffafb; }
+.danger-zone > p { max-width: 760px; color: #6f3340; line-height: 1.65; }
+.archive-summary { max-width: 620px; margin-bottom: 1.2rem; }
+.confirm-form { padding-top: .25rem; }
 .inline-form { display: inline; }
 .alert { margin-bottom: 1rem; padding: .85rem 1rem; border-radius: .75rem; font-size: .88rem; }
 .alert-success { color: var(--success); border: 1px solid #bcebd8; background: #eefbf5; }

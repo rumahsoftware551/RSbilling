@@ -16,6 +16,8 @@ Sudah tersedia:
 - penggantian password mandiri dan kewajiban mengganti password sementara pada login pertama;
 - penonaktifan akses staf per ISP tanpa memengaruhi tenant lain;
 - master paket dan pelanggan dengan edit status, pencarian, filter, serta pagination;
+- detail pelanggan, histori invoice/pembayaran, dan audit aktivitas;
+- arsip aman pelanggan/paket tanpa menghapus histori transaksi;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
@@ -73,4 +75,4 @@ sh scripts/verify.sh
 docker compose config
 ```
 
-Baca [rencana pengembangan](docs/ROADMAP.md) sebelum melanjutkan ke integrasi jaringan dan fitur SaaS komersial.
+Baca [rencana pengembangan](docs/ROADMAP.md) dan [checklist perkembangan](docs/DEVELOPMENT_CHECKLIST.md) sebelum melanjutkan ke integrasi jaringan dan fitur SaaS komersial.
