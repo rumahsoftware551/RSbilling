@@ -953,6 +953,212 @@ if ($path === '/notifications' && $method === 'GET') {
     exit;
 }
 
+if ($path === '/network-devices' && $method === 'POST') {
+    Auth::requireNetworkAccess();
+    verify_csrf();
+    $action = input('_action', 'create');
+    if (!in_array($action, ['create', 'test', 'rotate', 'disable', 'enable'], true)) {
+        flash('error', 'Aksi perangkat jaringan tidak valid.');
+        redirect('/network-devices');
+    }
+
+    $deviceId = null;
+    if ($action !== 'create') {
+        $deviceId = filter_var(input('device_id'), FILTER_VALIDATE_INT);
+        if (!$deviceId) {
+            flash('error', 'Perangkat jaringan tidak valid.');
+            redirect('/network-devices');
+        }
+    }
+
+    try {
+        $vault = in_array($action, ['create', 'test', 'rotate'], true)
+            ? CredentialVault::fromEnvironment()
+            : null;
+        $userId = (int) Auth::user()['id'];
+        $db->beginTransaction();
+
+        if ($action === 'create') {
+            $result = NetworkDeviceService::create(
+                $db,
+                $vault,
+                $tenantId,
+                $userId,
+                [
+                    'name' => input('name'),
+                    'driver' => input('driver'),
+                    'host' => input('host'),
+                    'port' => input('port'),
+                    'use_tls' => input('use_tls') === '1',
+                ],
+                ['username' => input('username'), 'password' => input('password')]
+            );
+            audit_event($db, 'network_device.created', 'network_device', $result['id'], [
+                'name' => $result['name'],
+                'driver' => $result['driver'],
+                'host' => $result['host'],
+                'port' => $result['port'],
+                'use_tls' => $result['use_tls'],
+            ]);
+            $message = $result['driver'] === 'simulator'
+                ? 'Simulator berhasil disimpan. Jalankan Uji simulator untuk mengaktifkannya.'
+                : 'Konfigurasi MikroTik disimpan terenkripsi. Adapter nyata tetap nonaktif.';
+        } elseif ($action === 'test') {
+            $result = NetworkDeviceService::testSimulator(
+                $db,
+                $vault,
+                $tenantId,
+                $userId,
+                (int) $deviceId
+            );
+            audit_event($db, 'network_device.simulator_tested', 'network_device', (int) $deviceId, [
+                'identity' => $result['identity'],
+                'version' => $result['version'],
+                'transport' => $result['transport'],
+                'latency_ms' => $result['latency_ms'],
+                'capabilities' => $result['capabilities'],
+            ]);
+            $message = 'Simulator lulus: ' . $result['identity'] . ' · ' . $result['latency_ms'] . ' ms.';
+        } elseif ($action === 'rotate') {
+            NetworkDeviceService::rotateCredentials(
+                $db,
+                $vault,
+                $tenantId,
+                $userId,
+                (int) $deviceId,
+                ['username' => input('username'), 'password' => input('password')]
+            );
+            audit_event($db, 'network_device.credentials_rotated', 'network_device', (int) $deviceId);
+            $message = 'Kredensial berhasil dirotasi dan perangkat dikembalikan ke status inactive.';
+        } else {
+            $newStatus = NetworkDeviceService::setDisabled(
+                $db,
+                $tenantId,
+                $userId,
+                (int) $deviceId,
+                $action === 'disable'
+            );
+            audit_event($db, 'network_device.status_changed', 'network_device', (int) $deviceId, [
+                'status' => $newStatus,
+            ]);
+            $message = $newStatus === 'disabled'
+                ? 'Perangkat berhasil dinonaktifkan.'
+                : 'Perangkat kembali inactive dan siap diuji ulang.';
+        }
+
+        $db->commit();
+        flash('success', $message);
+    } catch (InvalidArgumentException | DomainException $exception) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        flash('error', $exception->getMessage());
+    } catch (Throwable $exception) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $exception;
+    }
+    redirect('/network-devices');
+}
+
+if ($path === '/network-devices' && $method === 'GET') {
+    Auth::requireNetworkAccess();
+    $vaultConfigured = CredentialVault::isConfigured();
+    $query = $db->prepare(
+        'SELECT n.id, n.name, n.driver, n.host, n.port, n.use_tls, n.credential_key_version,
+                n.status, n.last_test_status, n.last_test_message, n.last_tested_at,
+                n.created_at, n.updated_at, creator.name AS created_by_name, updater.name AS updated_by_name
+         FROM network_devices n
+         INNER JOIN users creator ON creator.id = n.created_by
+         INNER JOIN users updater ON updater.id = n.updated_by
+         WHERE n.tenant_id = :tenant_id ORDER BY n.id DESC'
+    );
+    $query->execute(['tenant_id' => $tenantId]);
+    $devices = $query->fetchAll();
+    $deviceCounts = ['simulator' => 0, 'mikrotik' => 0, 'active' => 0, 'disabled' => 0];
+    foreach ($devices as $device) {
+        $deviceCounts[(string) $device['driver']]++;
+        if (isset($deviceCounts[(string) $device['status']])) {
+            $deviceCounts[(string) $device['status']]++;
+        }
+    }
+
+    View::header('Perangkat Jaringan');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Network automation</p><h1>Perangkat jaringan</h1></div>
+        <span class="secure-badge">Credential vault · tenant-safe</span>
+    </div>
+    <div class="notice">Adapter MikroTik nyata belum diaktifkan. Halaman ini tidak membuka socket, tidak menghubungi router, dan tidak mengirim perintah jaringan.</div>
+    <?php if (!$vaultConfigured): ?>
+        <div class="alert alert-error" role="status"><strong>APP_KEY belum valid.</strong> Tambahkan <code>APP_KEY=base64:&lt;hasil openssl rand -base64 32&gt;</code> ke file <code>.env</code>, lalu restart container app. Billing lain tetap dapat digunakan.</div>
+    <?php endif; ?>
+    <section class="stat-grid">
+        <article class="stat-card"><span>Simulator</span><strong><?= e($deviceCounts['simulator']) ?></strong><small>Tanpa koneksi eksternal</small></article>
+        <article class="stat-card"><span>Konfigurasi MikroTik</span><strong><?= e($deviceCounts['mikrotik']) ?></strong><small>Adapter belum aktif</small></article>
+        <article class="stat-card"><span>Aktif</span><strong><?= e($deviceCounts['active']) ?></strong><small>Simulator telah lulus</small></article>
+        <article class="stat-card"><span>Dinonaktifkan</span><strong><?= e($deviceCounts['disabled']) ?></strong><small>Tidak dapat diuji</small></article>
+    </section>
+    <section class="account-grid device-grid">
+        <article class="panel">
+            <h2>Tambah perangkat</h2>
+            <p class="muted">Username dan password langsung dienkripsi; nilai aslinya tidak dapat dilihat kembali dari UI.</p>
+            <?php if ($vaultConfigured): ?>
+                <form method="post" class="form-grid">
+                    <?= csrf_field() ?><input type="hidden" name="_action" value="create">
+                    <label>Nama perangkat<input type="text" name="name" maxlength="120" placeholder="Router POP Utama" required></label>
+                    <label>Driver<select name="driver" required><option value="simulator">Simulator aman</option><option value="mikrotik">MikroTik · adapter nonaktif</option></select></label>
+                    <label>Host<input type="text" name="host" maxlength="253" value="simulator.internal" required></label>
+                    <label>Port<input type="number" name="port" min="1" max="65535" value="8729" required></label>
+                    <label>Username API<input type="text" name="username" maxlength="120" autocomplete="off" required></label>
+                    <label>Password API<input type="password" name="password" minlength="8" maxlength="255" autocomplete="new-password" required></label>
+                    <label class="checkbox-field field-wide"><input type="checkbox" name="use_tls" value="1" checked><span>Gunakan mode TLS/API-SSL</span></label>
+                    <div class="form-action field-wide"><button class="button button-primary" type="submit">Simpan ke vault</button></div>
+                </form>
+            <?php else: ?>
+                <p class="muted">Form dikunci sampai APP_KEY dikonfigurasi.</p>
+            <?php endif; ?>
+        </article>
+        <article class="panel device-security">
+            <h2>Kontrol keamanan</h2>
+            <dl class="detail-list">
+                <div><dt>Enkripsi</dt><dd>AES-256-GCM dengan nonce acak dan authentication tag</dd></div>
+                <div><dt>Isolasi</dt><dd>AAD mengikat ciphertext ke ISP dan perangkat asal</dd></div>
+                <div><dt>Akses</dt><dd>Hanya owner dan admin, seluruh perubahan memakai CSRF serta audit log</dd></div>
+                <div><dt>Simulator</dt><dd>Tidak memakai cURL, socket, DNS lookup, atau API MikroTik</dd></div>
+                <div><dt>Secret</dt><dd>Tidak ditampilkan ulang dan tidak dimasukkan ke metadata audit</dd></div>
+            </dl>
+        </article>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Daftar perangkat</h2><p class="muted">Konfigurasi disimpan per tenant. Perangkat MikroTik nyata tetap inactive sampai adapter resmi tersedia.</p></div></div>
+        <div class="table-wrap">
+            <table><thead><tr><th>Perangkat</th><th>Endpoint</th><th>Status</th><th>Uji terakhir</th><th>Credential vault</th><th>Aksi</th></tr></thead><tbody>
+                <?php if ($devices === []): ?><tr><td colspan="6" class="muted">Belum ada perangkat jaringan.</td></tr><?php endif; ?>
+                <?php foreach ($devices as $device): ?>
+                    <tr>
+                        <td><strong><?= e($device['name']) ?></strong><small><?= e($device['driver']) ?> · dibuat <?= e($device['created_by_name']) ?></small></td>
+                        <td><?= e($device['host']) ?>:<?= e($device['port']) ?><small><?= (int) $device['use_tls'] === 1 ? 'TLS/API-SSL' : 'Tanpa TLS' ?></small></td>
+                        <td><span class="status status-<?= e($device['status']) ?>"><?= e($device['status']) ?></span></td>
+                        <td><span class="status status-<?= e($device['last_test_status']) ?>"><?= e($device['last_test_status']) ?></span><small><?= e($device['last_tested_at'] ?: 'Belum diuji') ?></small><?php if ($device['last_test_message']): ?><small><?= e($device['last_test_message']) ?></small><?php endif; ?></td>
+                        <td><span class="secure-badge">Encrypted v<?= e($device['credential_key_version']) ?></span><small>Diperbarui <?= e($device['updated_by_name']) ?></small></td>
+                        <td><div class="action-group">
+                            <?php if ($device['driver'] === 'simulator' && $device['status'] !== 'disabled' && $vaultConfigured): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="test"><input type="hidden" name="device_id" value="<?= e($device['id']) ?>"><button class="button button-small" type="submit">Uji simulator</button></form><?php endif; ?>
+                            <?php if ($device['driver'] === 'mikrotik'): ?><span class="muted">Adapter belum aktif</span><?php endif; ?>
+                            <?php if ($device['status'] === 'disabled'): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="enable"><input type="hidden" name="device_id" value="<?= e($device['id']) ?>"><button class="button button-link" type="submit">Aktifkan kembali</button></form><?php else: ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="disable"><input type="hidden" name="device_id" value="<?= e($device['id']) ?>"><button class="button button-danger" type="submit">Nonaktifkan</button></form><?php endif; ?>
+                            <?php if ($vaultConfigured): ?><details class="credential-rotate"><summary>Rotasi kredensial</summary><form method="post" class="stack-form"><?= csrf_field() ?><input type="hidden" name="_action" value="rotate"><input type="hidden" name="device_id" value="<?= e($device['id']) ?>"><label>Username baru<input type="text" name="username" maxlength="120" autocomplete="off" required></label><label>Password baru<input type="password" name="password" minlength="8" maxlength="255" autocomplete="new-password" required></label><button class="button button-secondary" type="submit">Simpan rotasi</button></form></details><?php endif; ?>
+                        </div></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
 if ($path === '/reconciliation/template' && $method === 'GET') {
     Auth::requireBillingAccess();
     header('Content-Type: text/csv; charset=UTF-8');

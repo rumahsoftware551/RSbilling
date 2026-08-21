@@ -197,6 +197,34 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
     CONSTRAINT notification_outbox_user_fk FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS network_devices (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id BIGINT UNSIGNED NOT NULL,
+    device_key CHAR(32) NOT NULL,
+    name VARCHAR(120) NOT NULL,
+    driver ENUM('simulator', 'mikrotik') NOT NULL DEFAULT 'simulator',
+    host VARCHAR(253) NOT NULL,
+    port SMALLINT UNSIGNED NOT NULL DEFAULT 8729,
+    use_tls TINYINT(1) NOT NULL DEFAULT 1,
+    credential_ciphertext TEXT NOT NULL,
+    credential_key_version SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    status ENUM('inactive', 'active', 'disabled') NOT NULL DEFAULT 'inactive',
+    last_test_status ENUM('never', 'success', 'failed') NOT NULL DEFAULT 'never',
+    last_test_message VARCHAR(190) NULL,
+    last_tested_at DATETIME NULL,
+    created_by BIGINT UNSIGNED NOT NULL,
+    updated_by BIGINT UNSIGNED NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY network_devices_tenant_name_unique (tenant_id, name),
+    UNIQUE KEY network_devices_tenant_device_key_unique (tenant_id, device_key),
+    KEY network_devices_tenant_status_idx (tenant_id, status),
+    CONSTRAINT network_devices_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT network_devices_created_user_fk FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT network_devices_updated_user_fk FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     tenant_id BIGINT UNSIGNED NOT NULL,

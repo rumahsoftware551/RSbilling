@@ -38,7 +38,9 @@ Status: sedang dikerjakan pada branch `codex/security-runtime-hardening`.
 
 ## Fase 3 — Network automation
 
-- integrasi MikroTik API dengan secret terenkripsi;
+- [x] credential vault terenkripsi per tenant dengan AES-256-GCM;
+- [x] simulator perangkat tanpa socket atau koneksi jaringan eksternal;
+- integrasi MikroTik API nyata;
 - FreeRADIUS dan proyeksi `radcheck`/`radreply`;
 - suspend, disconnect, pembayaran, dan reaktivasi idempotent;
 - retry queue, dead-letter handling, serta audit perintah perangkat;

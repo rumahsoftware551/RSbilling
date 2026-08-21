@@ -5,6 +5,9 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/app/BillingService.php';
 require_once dirname(__DIR__) . '/app/CsvService.php';
 require_once dirname(__DIR__) . '/app/CustomerImportService.php';
+require_once dirname(__DIR__) . '/app/CredentialVault.php';
+require_once dirname(__DIR__) . '/app/NetworkDeviceService.php';
+require_once dirname(__DIR__) . '/app/NetworkDeviceSimulator.php';
 require_once dirname(__DIR__) . '/app/NotificationService.php';
 require_once dirname(__DIR__) . '/app/PaymentReconciliationService.php';
 require_once dirname(__DIR__) . '/app/Pagination.php';
@@ -37,6 +40,63 @@ assert_operational($prorated['subtotal'] === 50000.0, 'Perhitungan prorata tidak
 assert_operational(
     BillingService::totalWithPenalty(50000, 0, 0, 5000) === 55000.0,
     'Penetapan denda absolut tidak sesuai.'
+);
+
+$vault = CredentialVault::fromBase64('base64:' . base64_encode(str_repeat('K', 32)));
+$vaultAad = 'rsbilling|network-device|v1|7|0123456789abcdef0123456789abcdef';
+$vaultCredentials = ['username' => 'router-admin', 'password' => 'Kunci-Router-Uji-2026!'];
+$vaultPayload = $vault->encrypt($vaultCredentials, $vaultAad);
+assert_operational(
+    !str_contains($vaultPayload, $vaultCredentials['username'])
+        && !str_contains($vaultPayload, $vaultCredentials['password']),
+    'Ciphertext credential vault tidak boleh memuat username atau password plaintext.'
+);
+assert_operational(
+    $vault->decrypt($vaultPayload, $vaultAad) === $vaultCredentials,
+    'Credential vault wajib membuka kembali payload hanya dengan key dan AAD yang benar.'
+);
+$vaultRejectedWrongContext = false;
+try {
+    $vault->decrypt($vaultPayload, $vaultAad . '|tenant-lain');
+} catch (RuntimeException) {
+    $vaultRejectedWrongContext = true;
+}
+assert_operational($vaultRejectedWrongContext, 'Credential vault wajib menolak AAD tenant/perangkat yang berbeda.');
+$tamperedVaultData = json_decode($vaultPayload, true, 8, JSON_THROW_ON_ERROR);
+$tamperedVaultData['c'][0] = $tamperedVaultData['c'][0] === 'A' ? 'B' : 'A';
+$tamperedVaultPayload = json_encode($tamperedVaultData, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+$vaultRejectedTampering = false;
+try {
+    $vault->decrypt($tamperedVaultPayload, $vaultAad);
+} catch (RuntimeException) {
+    $vaultRejectedTampering = true;
+}
+assert_operational($vaultRejectedTampering, 'Credential vault wajib menolak ciphertext yang diubah.');
+
+$deviceConfiguration = NetworkDeviceService::validateConfiguration([
+    'name' => 'Router Simulator Uji',
+    'driver' => 'simulator',
+    'host' => 'SIMULATOR.INTERNAL.',
+    'port' => '8729',
+    'use_tls' => true,
+]);
+assert_operational(
+    $deviceConfiguration['host'] === 'simulator.internal' && $deviceConfiguration['port'] === 8729,
+    'Konfigurasi perangkat wajib divalidasi dan dinormalisasi.'
+);
+$simulatorResult = NetworkDeviceSimulator::probe([
+    'driver' => 'simulator',
+    'device_key' => '0123456789abcdef0123456789abcdef',
+    'use_tls' => 1,
+], $vaultCredentials);
+assert_operational(
+    $simulatorResult['status'] === 'success'
+        && in_array('suspend_preview', $simulatorResult['capabilities'], true),
+    'Simulator wajib menyediakan probe dan preview capability tanpa perangkat nyata.'
+);
+assert_operational(
+    !str_contains(json_encode($simulatorResult, JSON_THROW_ON_ERROR), $vaultCredentials['password']),
+    'Hasil simulator tidak boleh membocorkan credential vault.'
 );
 
 $invalidDiscountRejected = false;
@@ -184,6 +244,13 @@ assert_operational(
     'Staging rekonsiliasi wajib memiliki isolasi tenant, referensi unik, dan index status.'
 );
 assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS network_devices')
+        && str_contains($schema, 'credential_ciphertext TEXT NOT NULL')
+        && str_contains($schema, 'network_devices_tenant_name_unique (tenant_id, name)')
+        && str_contains($schema, 'network_devices_tenant_status_idx (tenant_id, status)'),
+    'Perangkat jaringan wajib memiliki credential ciphertext, isolasi tenant, dan index operasional.'
+);
+assert_operational(
     str_contains($installer, "if (!\$columnExists(\$db, 'invoices', 'base_amount'))")
         && str_contains($installer, 'UPDATE invoices SET base_amount = amount, subtotal = amount'),
     'Migrasi komponen invoice wajib idempotent dan mem-backfill invoice lama.'
@@ -251,6 +318,14 @@ assert_operational(
         && str_contains($routes, "audit_event(\$db, 'payment.reconciled'")
         && str_contains($routes, "if (\$path === '/reconciliation' && \$method === 'GET')"),
     'Rekonsiliasi wajib memiliki import, exact-match, posting, audit, dan UI.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/network-devices' && \$method === 'POST')")
+        && str_contains($routes, 'NetworkDeviceService::create(')
+        && str_contains($routes, 'NetworkDeviceService::testSimulator(')
+        && str_contains($routes, "audit_event(\$db, 'network_device.created'")
+        && str_contains($routes, "if (\$path === '/network-devices' && \$method === 'GET')"),
+    'Perangkat jaringan wajib memiliki vault, simulator, audit, dan UI operasional.'
 );
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");

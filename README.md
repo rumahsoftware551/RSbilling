@@ -24,6 +24,7 @@ Sudah tersedia:
 - import pelanggan CSV atomik serta export tagihan dan kas CSV yang aman untuk Excel;
 - notification outbox WhatsApp/email per tenant dengan template invoice, idempotensi, retry, auto-cancel saat invoice selesai, dan audit;
 - rekonsiliasi pembayaran CSV dengan staging, exact-match invoice/nominal, posting atomik, serta pencegahan referensi duplikat;
+- credential vault perangkat jaringan terenkripsi per tenant dan simulator aman tanpa koneksi eksternal;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
@@ -45,6 +46,7 @@ cp .env.example .env
 Edit `.env`, lalu ganti minimal nilai berikut dengan nilai unik:
 
 - `DB_PASSWORD`
+- `APP_KEY` (hasil `openssl rand -base64 32`, diawali `base64:`)
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD` (minimal 12 karakter)
 - `ADMIN_TENANT_NAME`
@@ -57,6 +59,9 @@ Password acak dapat dibuat dengan:
 ```bash
 openssl rand -base64 32
 ```
+
+Gunakan hasil berbeda untuk `DB_PASSWORD` dan `APP_KEY`. Jangan mengganti `APP_KEY` setelah perangkat
+disimpan sebelum tersedia prosedur rotasi kunci, karena kredensial lama tidak akan dapat dibuka.
 
 Jalankan aplikasi:
 

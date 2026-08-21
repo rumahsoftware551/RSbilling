@@ -27,6 +27,7 @@ final class View
             <a href="/customers">Pelanggan</a>
             <a href="/plans">Paket</a>
             <a href="/invoices">Tagihan</a>
+            <?php if (Auth::canManageNetwork()): ?><a href="/network-devices">Perangkat</a><?php endif; ?>
             <?php if (Auth::canManageBilling()): ?><a href="/notifications">Notifikasi</a><?php endif; ?>
             <?php if (Auth::canManageBilling()): ?><a href="/reconciliation">Rekonsiliasi</a><?php endif; ?>
             <?php if (Auth::canViewReports()): ?><a href="/reports">Laporan</a><?php endif; ?>

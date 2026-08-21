@@ -125,6 +125,11 @@ final class Auth
         return in_array((string) ($_SESSION['auth']['role'] ?? ''), ['owner', 'admin'], true);
     }
 
+    public static function canManageNetwork(): bool
+    {
+        return in_array((string) ($_SESSION['auth']['role'] ?? ''), ['owner', 'admin'], true);
+    }
+
     public static function canViewReports(): bool
     {
         return in_array((string) ($_SESSION['auth']['role'] ?? ''), ['owner', 'admin', 'billing', 'viewer'], true);
@@ -145,6 +150,15 @@ final class Auth
         if (!self::canManageUsers()) {
             http_response_code(403);
             exit('Anda tidak memiliki izin untuk mengelola pengguna.');
+        }
+    }
+
+    public static function requireNetworkAccess(): void
+    {
+        self::requireLogin();
+        if (!self::canManageNetwork()) {
+            http_response_code(403);
+            exit('Anda tidak memiliki izin untuk mengelola perangkat jaringan.');
         }
     }
 

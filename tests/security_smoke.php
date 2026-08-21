@@ -23,6 +23,9 @@ $envExample = file_get_contents(dirname(__DIR__) . '/.env.example') ?: '';
 $routes = file_get_contents(dirname(__DIR__) . '/public/index.php') ?: '';
 $notificationService = file_get_contents(dirname(__DIR__) . '/app/NotificationService.php') ?: '';
 $reconciliationService = file_get_contents(dirname(__DIR__) . '/app/PaymentReconciliationService.php') ?: '';
+$credentialVault = file_get_contents(dirname(__DIR__) . '/app/CredentialVault.php') ?: '';
+$networkDeviceService = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceService.php') ?: '';
+$networkSimulator = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceSimulator.php') ?: '';
 
 expect(str_contains($auth, 'password_verify'), 'Login wajib memakai password_verify.');
 expect(str_contains($auth, 'session_regenerate_id(true)'), 'Login wajib meregenerasi session ID.');
@@ -35,6 +38,7 @@ expect(str_contains($schema, "status ENUM('active', 'disabled')"), 'Membership t
 expect(str_contains($nginx, 'root /var/www/html/public;'), 'Nginx hanya boleh melayani public directory.');
 expect(!str_contains($envExample, 'DB_USERNAME=root'), 'Aplikasi baru tidak boleh memakai akun root database.');
 expect(str_contains($envExample, 'GANTI_DENGAN_PASSWORD_DATABASE_KUAT'), 'Contoh environment wajib meminta password unik.');
+expect(str_contains($envExample, 'APP_KEY=base64:'), 'Contoh environment wajib meminta key credential vault.');
 expect(PasswordPolicy::isAcceptable('Kunci-Aman-RSBilling-2026!'), 'Password kuat seharusnya diterima.');
 expect(!PasswordPolicy::isAcceptable('Admin@12345'), 'Password contoh wajib ditolak.');
 expect(!PasswordPolicy::isAcceptable('pendek123'), 'Password pendek wajib ditolak.');
@@ -69,6 +73,22 @@ expect(
         && str_contains($reconciliationService, "WHERE invoice_id = :invoice_id AND tenant_id = :tenant_id AND match_status = 'matched'")
         && str_contains($schema, 'payment_reconciliations_tenant_method_reference_unique'),
     'Rekonsiliasi wajib terlindungi CSRF, tenant scope, lock, status, dan referensi unik.'
+);
+expect(
+    str_contains($auth, "['owner', 'admin']")
+        && str_contains($auth, 'public static function requireNetworkAccess()')
+        && str_contains($routes, "if (\$path === '/network-devices' && \$method === 'POST') {\n    Auth::requireNetworkAccess();\n    verify_csrf();")
+        && str_contains($networkDeviceService, 'WHERE id = :id AND tenant_id = :tenant_id LIMIT 1 FOR UPDATE')
+        && str_contains($schema, 'credential_ciphertext TEXT NOT NULL'),
+    'Pengelolaan perangkat wajib dibatasi owner/admin, CSRF, tenant scope, dan ciphertext.'
+);
+expect(
+    str_contains($credentialVault, "private const CIPHER = 'aes-256-gcm'")
+        && str_contains($credentialVault, 'openssl_encrypt(')
+        && str_contains($credentialVault, 'openssl_decrypt(')
+        && str_contains($networkDeviceService, "'rsbilling|network-device|v1|'")
+        && !preg_match('/\b(curl_|fsockopen|stream_socket_client|socket_create|gethostbyname)\s*\(/', $networkSimulator),
+    'Vault wajib memakai authenticated encryption dan simulator tidak boleh membuka koneksi jaringan.'
 );
 
 $paths = [dirname(__DIR__) . '/app', dirname(__DIR__) . '/public', dirname(__DIR__) . '/database'];

@@ -43,11 +43,12 @@ Checklist ini diperbarui setiap kali satu milestone selesai dan telah melewati p
 
 ## Fase 3 — Network automation
 
-- [ ] penyimpanan credential MikroTik terenkripsi
+- [x] penyimpanan credential MikroTik terenkripsi per tenant dengan authenticated encryption
+- [x] simulator perangkat tanpa koneksi jaringan eksternal
 - [ ] integrasi MikroTik API
 - [ ] FreeRADIUS dan proyeksi `radcheck`/`radreply`
 - [ ] suspend, disconnect, dan reaktivasi idempotent
-- [ ] retry queue, dead-letter handling, dan simulator perangkat
+- [ ] retry queue dan dead-letter handling
 
 ## Fase 4 — SaaS komersial
 

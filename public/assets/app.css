@@ -65,7 +65,7 @@ th, td { padding: .85rem .75rem; border-bottom: 1px solid var(--line); text-alig
 th { color: var(--muted); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; }
 td small { display: block; margin-top: .2rem; color: var(--muted); }
 .status { display: inline-flex; padding: .3rem .55rem; border-radius: 99px; color: #44506b; background: #eef1f6; font-size: .72rem; font-weight: 750; text-transform: capitalize; }
-.status-active, .status-paid, .status-sent, .status-posted { color: var(--success); background: #eaf8f1; }
+.status-active, .status-paid, .status-sent, .status-posted, .status-success { color: var(--success); background: #eaf8f1; }
 .status-pending { color: #875300; background: #fff4d8; }
 .status-processing, .status-matched { color: var(--blue); background: #eaf1ff; }
 .status-ignored { color: #566178; background: #eef1f6; }
@@ -122,6 +122,13 @@ td small { display: block; margin-top: .2rem; color: var(--muted); }
 .error-text { color: var(--danger); }
 .reconciliation-filter { margin-bottom: 1rem; }
 .reconciliation-filter .form-action { gap: .55rem; }
+.device-grid { margin-bottom: 1.2rem; }
+.checkbox-field { display: flex; align-items: center; gap: .6rem; }
+.checkbox-field input { width: auto; }
+.credential-rotate { position: relative; }
+.credential-rotate summary { color: var(--blue); font-size: .78rem; font-weight: 750; cursor: pointer; }
+.credential-rotate .stack-form { min-width: 230px; margin-top: .7rem; padding: .8rem; border: 1px solid var(--line); border-radius: .7rem; background: #fff; }
+.device-security { border-color: #bcebd8; background: #f8fffb; }
 .print-body { background: #eef2f7; }
 .invoice-print-shell { width: min(900px, 94vw); margin: 2rem auto; }
 .print-help { margin-bottom: 1rem; padding: 1rem 1.2rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border: 1px solid var(--line); border-radius: .8rem; background: #fff; }
