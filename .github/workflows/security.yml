@@ -1,0 +1,22 @@
+name: Security baseline
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  php-lint-and-smoke:
+    runs-on: ubuntu-latest
+    container: php:8.3-cli-alpine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: PHP syntax
+        run: find app config database public tests -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Security smoke test
+        run: php tests/security_smoke.php
