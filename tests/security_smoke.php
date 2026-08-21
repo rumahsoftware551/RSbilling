@@ -21,6 +21,7 @@ $schema = file_get_contents(dirname(__DIR__) . '/database/schema.sql') ?: '';
 $nginx = file_get_contents(dirname(__DIR__) . '/docker/nginx/default.conf') ?: '';
 $envExample = file_get_contents(dirname(__DIR__) . '/.env.example') ?: '';
 $routes = file_get_contents(dirname(__DIR__) . '/public/index.php') ?: '';
+$notificationService = file_get_contents(dirname(__DIR__) . '/app/NotificationService.php') ?: '';
 
 expect(str_contains($auth, 'password_verify'), 'Login wajib memakai password_verify.');
 expect(str_contains($auth, 'session_regenerate_id(true)'), 'Login wajib meregenerasi session ID.');
@@ -48,6 +49,14 @@ expect(
         && str_contains($routes, "WHERE tenant_id = :tenant_id AND customer_code IN")
         && str_contains($routes, "WHERE p.tenant_id = :tenant_id AND p.paid_at >= :date_from"),
     'Import dan export CSV wajib terlindungi CSRF serta isolasi tenant.'
+);
+expect(
+    str_contains($routes, "if (\$path === '/notifications' && \$method === 'POST') {\n    Auth::requireBillingAccess();\n    verify_csrf();")
+        && str_contains($notificationService, "WHERE i.id = :invoice_id AND i.tenant_id = :tenant_id")
+        && str_contains($notificationService, 'WHERE invoice_id = :invoice_id AND tenant_id = :tenant_id')
+        && str_contains($notificationService, "AND n.status IN ('failed', 'cancelled') AND i.status = 'unpaid'")
+        && str_contains($schema, 'notification_outbox_tenant_idempotency_unique (tenant_id, idempotency_key)'),
+    'Outbox notifikasi wajib terlindungi role, CSRF, isolasi tenant, dan idempotensi.'
 );
 
 $paths = [dirname(__DIR__) . '/app', dirname(__DIR__) . '/public', dirname(__DIR__) . '/database'];

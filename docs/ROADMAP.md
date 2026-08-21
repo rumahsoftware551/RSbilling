@@ -31,7 +31,8 @@ Status: sedang dikerjakan pada branch `codex/security-runtime-hardening`.
 - [x] pajak, diskon, prorata, denda idempotent, dan invoice siap cetak/PDF;
 - [x] laporan pendapatan tagihan, kas masuk, aging piutang, dan prioritas penagihan;
 - [x] import pelanggan CSV tervalidasi serta export tagihan dan kas CSV;
-- notifikasi WhatsApp/email dengan antrean;
+- [x] notification outbox per tenant dengan template invoice, idempotensi, retry, auto-cancel invoice selesai, dan audit;
+- adapter provider WhatsApp/email serta background worker;
 - rekonsiliasi pembayaran;
 
 ## Fase 3 — Network automation

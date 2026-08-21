@@ -131,6 +131,39 @@ CREATE TABLE IF NOT EXISTS payments (
     CONSTRAINT payments_user_fk FOREIGN KEY (recorded_by) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id BIGINT UNSIGNED NOT NULL,
+    invoice_id BIGINT UNSIGNED NULL,
+    customer_id BIGINT UNSIGNED NOT NULL,
+    channel ENUM('whatsapp', 'email') NOT NULL,
+    recipient VARCHAR(190) NOT NULL,
+    template VARCHAR(80) NOT NULL,
+    subject VARCHAR(190) NULL,
+    message TEXT NOT NULL,
+    status ENUM('pending', 'processing', 'sent', 'failed', 'cancelled') NOT NULL DEFAULT 'pending',
+    attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    max_attempts SMALLINT UNSIGNED NOT NULL DEFAULT 3,
+    available_at DATETIME NOT NULL,
+    locked_at DATETIME NULL,
+    sent_at DATETIME NULL,
+    provider_reference VARCHAR(190) NULL,
+    last_error VARCHAR(500) NULL,
+    idempotency_key CHAR(64) NOT NULL,
+    created_by BIGINT UNSIGNED NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY notification_outbox_tenant_idempotency_unique (tenant_id, idempotency_key),
+    KEY notification_outbox_tenant_queue_idx (tenant_id, status, available_at),
+    KEY notification_outbox_invoice_idx (invoice_id),
+    KEY notification_outbox_customer_idx (customer_id),
+    CONSTRAINT notification_outbox_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT notification_outbox_invoice_fk FOREIGN KEY (invoice_id) REFERENCES invoices (id) ON DELETE RESTRICT,
+    CONSTRAINT notification_outbox_customer_fk FOREIGN KEY (customer_id) REFERENCES customers (id) ON DELETE RESTRICT,
+    CONSTRAINT notification_outbox_user_fk FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     tenant_id BIGINT UNSIGNED NOT NULL,

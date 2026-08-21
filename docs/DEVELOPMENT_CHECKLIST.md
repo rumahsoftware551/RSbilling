@@ -36,7 +36,8 @@ Checklist ini diperbarui setiap kali satu milestone selesai dan telah melewati p
 - [x] invoice siap cetak dan disimpan sebagai PDF melalui browser
 - [x] laporan piutang, pendapatan tagihan, kas masuk, aging, dan prioritas penagihan
 - [x] import pelanggan CSV atomik serta export tagihan dan kas CSV
-- [ ] notifikasi WhatsApp/email dengan antrean
+- [x] notification outbox per tenant, template invoice, idempotensi, retry, auto-cancel invoice selesai, dan audit
+- [ ] adapter provider WhatsApp/email serta background worker
 - [ ] rekonsiliasi pembayaran
 
 ## Fase 3 — Network automation

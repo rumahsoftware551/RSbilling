@@ -22,6 +22,7 @@ Sudah tersedia:
 - tampilan invoice siap cetak atau disimpan sebagai PDF dari browser;
 - laporan pendapatan tagihan, kas masuk, aging piutang, dan prioritas penagihan;
 - import pelanggan CSV atomik serta export tagihan dan kas CSV yang aman untuk Excel;
+- notification outbox WhatsApp/email per tenant dengan template invoice, idempotensi, retry, auto-cancel saat invoice selesai, dan audit;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
@@ -29,6 +30,8 @@ Sudah tersedia:
 - pemeriksaan keamanan otomatis di GitHub Actions.
 
 Source lama tetap berada di `netbill-master/` sebagai referensi migrasi. Konfigurasi Nginx hanya melayani folder `public/`, sehingga source lama dan file konfigurasi tidak dapat diakses dari browser.
+
+Antrean notifikasi pada fase ini belum mengirim pesan ke provider eksternal. Pesan disimpan sebagai outbox internal sampai adapter WhatsApp/email, worker, dan kredensial tenant dikonfigurasi serta diuji.
 
 ## Menjalankan secara lokal
 

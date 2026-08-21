@@ -765,6 +765,194 @@ if ($path === '/plans' && $method === 'POST') {
     redirect('/plans');
 }
 
+if ($path === '/notifications' && $method === 'POST') {
+    Auth::requireBillingAccess();
+    verify_csrf();
+    $action = input('_action');
+    if (!in_array($action, ['enqueue', 'cancel', 'retry'], true)) {
+        flash('error', 'Aksi notifikasi tidak dikenali.');
+        redirect('/notifications');
+    }
+
+    if ($action === 'enqueue') {
+        $invoiceId = filter_var(input('invoice_id'), FILTER_VALIDATE_INT);
+        $channel = input('channel');
+        if (!$invoiceId) {
+            flash('error', 'Invoice untuk notifikasi tidak valid.');
+            redirect('/invoices');
+        }
+
+        $db->beginTransaction();
+        try {
+            $result = NotificationService::enqueueInvoice(
+                $db,
+                $tenantId,
+                (int) Auth::user()['id'],
+                (int) $invoiceId,
+                $channel
+            );
+            if ($result['created']) {
+                audit_event($db, 'notification.queued', 'notification', (int) $result['id'], [
+                    'invoice_id' => (int) $invoiceId,
+                    'channel' => $channel,
+                    'template' => $result['template'],
+                ]);
+            }
+            $db->commit();
+            flash(
+                'success',
+                $result['created']
+                    ? 'Pengingat berhasil dimasukkan ke antrean internal.'
+                    : 'Pengingat identik sudah tersedia dengan status ' . $result['status'] . '.'
+            );
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof DomainException || $exception instanceof InvalidArgumentException) {
+                flash('error', $exception->getMessage());
+            } else {
+                throw $exception;
+            }
+        }
+        redirect('/invoices/view?id=' . $invoiceId);
+    }
+
+    $notificationId = filter_var(input('notification_id'), FILTER_VALIDATE_INT);
+    if (!$notificationId) {
+        flash('error', 'Notifikasi tidak valid.');
+        redirect('/notifications');
+    }
+    $db->beginTransaction();
+    try {
+        if ($action === 'cancel') {
+            NotificationService::cancel($db, $tenantId, (int) $notificationId);
+            $auditAction = 'notification.cancelled';
+            $message = 'Notifikasi berhasil dibatalkan.';
+        } else {
+            NotificationService::retry($db, $tenantId, (int) $notificationId);
+            $auditAction = 'notification.retried';
+            $message = 'Notifikasi berhasil dimasukkan ulang ke antrean.';
+        }
+        audit_event($db, $auditAction, 'notification', (int) $notificationId);
+        $db->commit();
+        flash('success', $message);
+    } catch (Throwable $exception) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        if ($exception instanceof DomainException) {
+            flash('error', $exception->getMessage());
+        } else {
+            throw $exception;
+        }
+    }
+    redirect('/notifications');
+}
+
+if ($path === '/notifications' && $method === 'GET') {
+    Auth::requireBillingAccess();
+    $statusFilter = query_input('status');
+    $channelFilter = query_input('channel');
+    if (!in_array($statusFilter, ['', 'pending', 'processing', 'sent', 'failed', 'cancelled'], true)) {
+        $statusFilter = '';
+    }
+    if (!in_array($channelFilter, ['', 'whatsapp', 'email'], true)) {
+        $channelFilter = '';
+    }
+
+    $statusCounts = ['pending' => 0, 'processing' => 0, 'sent' => 0, 'failed' => 0, 'cancelled' => 0];
+    $summaryQuery = $db->prepare(
+        'SELECT status, COUNT(*) AS total FROM notification_outbox
+         WHERE tenant_id = :tenant_id GROUP BY status'
+    );
+    $summaryQuery->execute(['tenant_id' => $tenantId]);
+    foreach ($summaryQuery as $summary) {
+        $statusCounts[(string) $summary['status']] = (int) $summary['total'];
+    }
+
+    $where = ['n.tenant_id = :tenant_id'];
+    $params = ['tenant_id' => $tenantId];
+    if ($statusFilter !== '') {
+        $where[] = 'n.status = :status';
+        $params['status'] = $statusFilter;
+    }
+    if ($channelFilter !== '') {
+        $where[] = 'n.channel = :channel';
+        $params['channel'] = $channelFilter;
+    }
+    $whereSql = implode(' AND ', $where);
+    $countQuery = $db->prepare('SELECT COUNT(*) FROM notification_outbox n WHERE ' . $whereSql);
+    $countQuery->execute($params);
+    $pagination = new Pagination((int) $countQuery->fetchColumn(), requested_page());
+
+    $queueQuery = $db->prepare(
+        'SELECT n.id, n.channel, n.recipient, n.template, n.subject, n.message, n.status,
+                n.attempts, n.max_attempts, n.available_at, n.sent_at, n.last_error, n.created_at,
+                i.id AS invoice_id, i.invoice_number, c.customer_code, c.name AS customer_name,
+                u.name AS created_by_name
+         FROM notification_outbox n
+         LEFT JOIN invoices i ON i.id = n.invoice_id AND i.tenant_id = n.tenant_id
+         INNER JOIN customers c ON c.id = n.customer_id AND c.tenant_id = n.tenant_id
+         INNER JOIN users u ON u.id = n.created_by
+         WHERE ' . $whereSql . ' ORDER BY n.id DESC LIMIT :limit OFFSET :offset'
+    );
+    foreach ($params as $key => $value) {
+        $queueQuery->bindValue(':' . $key, $value);
+    }
+    $queueQuery->bindValue(':limit', $pagination->perPage, PDO::PARAM_INT);
+    $queueQuery->bindValue(':offset', $pagination->offset(), PDO::PARAM_INT);
+    $queueQuery->execute();
+    $notifications = $queueQuery->fetchAll();
+
+    View::header('Antrean Notifikasi');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Komunikasi pelanggan</p><h1>Antrean notifikasi</h1></div>
+        <span class="secure-badge">Tenant-safe outbox</span>
+    </div>
+    <div class="notice">Pengiriman provider belum diaktifkan. Pesan berstatus pending tersimpan aman dan tidak akan dikirim sampai adapter WhatsApp/email serta worker dikonfigurasi.</div>
+    <section class="stat-grid">
+        <article class="stat-card"><span>Menunggu</span><strong><?= e($statusCounts['pending']) ?></strong><small>Siap diproses worker</small></article>
+        <article class="stat-card"><span>Terkirim</span><strong><?= e($statusCounts['sent']) ?></strong><small>Konfirmasi provider</small></article>
+        <article class="stat-card"><span>Gagal</span><strong><?= e($statusCounts['failed']) ?></strong><small>Dapat dicoba ulang</small></article>
+        <article class="stat-card"><span>Dibatalkan</span><strong><?= e($statusCounts['cancelled']) ?></strong><small>Tidak akan dikirim</small></article>
+    </section>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Daftar pesan</h2><p class="muted">Pesan dibuat dari detail invoice dan dilindungi kunci idempotensi.</p></div></div>
+        <form method="get" class="report-filter">
+            <label>Status<select name="status"><option value="">Semua status</option><?php foreach (['pending', 'processing', 'sent', 'failed', 'cancelled'] as $status): ?><option value="<?= e($status) ?>"<?= $statusFilter === $status ? ' selected' : '' ?>><?= e($status) ?></option><?php endforeach; ?></select></label>
+            <label>Kanal<select name="channel"><option value="">Semua kanal</option><option value="whatsapp"<?= $channelFilter === 'whatsapp' ? ' selected' : '' ?>>WhatsApp</option><option value="email"<?= $channelFilter === 'email' ? ' selected' : '' ?>>Email</option></select></label>
+            <button class="button button-primary" type="submit">Terapkan</button>
+            <a class="button button-secondary" href="/notifications">Reset</a>
+        </form>
+        <div class="table-wrap">
+            <table><thead><tr><th>Dibuat</th><th>Pelanggan</th><th>Invoice</th><th>Kanal</th><th>Tujuan</th><th>Status</th><th>Pesan</th><th>Aksi</th></tr></thead><tbody>
+                <?php if ($notifications === []): ?><tr><td colspan="8" class="muted">Belum ada notifikasi yang sesuai.</td></tr><?php endif; ?>
+                <?php foreach ($notifications as $notification): ?>
+                    <tr>
+                        <td><?= e($notification['created_at']) ?><small><?= e($notification['created_by_name']) ?></small></td>
+                        <td><?= e($notification['customer_code']) ?><small><?= e($notification['customer_name']) ?></small></td>
+                        <td><?php if ($notification['invoice_id']): ?><a class="table-link" href="/invoices/view?id=<?= e($notification['invoice_id']) ?>"><?= e($notification['invoice_number']) ?></a><?php else: ?>—<?php endif; ?></td>
+                        <td><span class="role-badge"><?= e($notification['channel']) ?></span></td>
+                        <td><?= e($notification['recipient']) ?></td>
+                        <td><span class="status status-<?= e($notification['status']) ?>"><?= e($notification['status']) ?></span><small>Percobaan <?= e($notification['attempts']) ?>/<?= e($notification['max_attempts']) ?></small></td>
+                        <td><details class="notification-preview"><summary>Lihat pesan</summary><?php if ($notification['subject']): ?><strong><?= e($notification['subject']) ?></strong><?php endif; ?><pre><?= e($notification['message']) ?></pre><?php if ($notification['last_error']): ?><small class="error-text"><?= e($notification['last_error']) ?></small><?php endif; ?></details></td>
+                        <td><div class="action-group">
+                            <?php if (in_array($notification['status'], ['failed', 'cancelled'], true)): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="retry"><input type="hidden" name="notification_id" value="<?= e($notification['id']) ?>"><button class="button button-link" type="submit">Ulangi</button></form><?php endif; ?>
+                            <?php if (in_array($notification['status'], ['pending', 'failed'], true)): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="cancel"><input type="hidden" name="notification_id" value="<?= e($notification['id']) ?>"><button class="button button-danger" type="submit">Batalkan</button></form><?php endif; ?>
+                        </div></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+        <?php View::pagination($pagination); ?>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
 if ($path === '/invoices' && $method === 'POST') {
     Auth::requireBillingAccess();
     verify_csrf();
@@ -804,7 +992,10 @@ if ($path === '/invoices' && $method === 'POST') {
             ]);
             $db->prepare("UPDATE invoices SET status = 'paid', paid_at = NOW() WHERE id = :id AND tenant_id = :tenant_id")
                 ->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
-            audit_event($db, 'invoice.paid', 'invoice', (int) $invoiceId);
+            $cancelledNotifications = NotificationService::cancelInvoiceNotifications($db, $tenantId, (int) $invoiceId);
+            audit_event($db, 'invoice.paid', 'invoice', (int) $invoiceId, [
+                'cancelled_notifications' => $cancelledNotifications,
+            ]);
             $db->commit();
             flash('success', 'Pembayaran berhasil dicatat.');
         } catch (Throwable $exception) {
@@ -839,7 +1030,10 @@ if ($path === '/invoices' && $method === 'POST') {
                 "UPDATE invoices SET status = 'cancelled'
                  WHERE id = :id AND tenant_id = :tenant_id"
             )->execute(['id' => $invoiceId, 'tenant_id' => $tenantId]);
-            audit_event($db, 'invoice.cancelled', 'invoice', (int) $invoiceId);
+            $cancelledNotifications = NotificationService::cancelInvoiceNotifications($db, $tenantId, (int) $invoiceId);
+            audit_event($db, 'invoice.cancelled', 'invoice', (int) $invoiceId, [
+                'cancelled_notifications' => $cancelledNotifications,
+            ]);
             $db->commit();
             flash('success', 'Tagihan berhasil dibatalkan.');
         } catch (Throwable $exception) {
@@ -2148,6 +2342,15 @@ if ($path === '/invoices/view') {
     $paymentsQuery->execute(['invoice_id' => $invoiceId, 'tenant_id' => $tenantId]);
     $invoicePayments = $paymentsQuery->fetchAll();
 
+    $notificationQuery = $db->prepare(
+        'SELECT id, channel, recipient, template, status, attempts, max_attempts, created_at, sent_at
+         FROM notification_outbox
+         WHERE invoice_id = :invoice_id AND tenant_id = :tenant_id
+         ORDER BY id DESC LIMIT 20'
+    );
+    $notificationQuery->execute(['invoice_id' => $invoiceId, 'tenant_id' => $tenantId]);
+    $invoiceNotifications = $notificationQuery->fetchAll();
+
     $historyQuery = $db->prepare(
         "SELECT a.action, a.metadata_json, a.created_at, u.name AS actor_name
          FROM audit_logs a INNER JOIN users u ON u.id = a.user_id
@@ -2211,6 +2414,23 @@ if ($path === '/invoices/view') {
             </dl>
         </article>
     </section>
+    <?php if ($invoice['status'] === 'unpaid' && Auth::canManageBilling()): ?>
+        <section class="panel">
+            <div class="section-heading"><div><h2>Antrekan pengingat</h2><p class="muted">Pesan disimpan secara idempotent pada outbox internal. Pengiriman provider belum diaktifkan.</p></div><a class="button button-secondary" href="/notifications">Lihat antrean</a></div>
+            <?php if ($invoice['phone'] !== '' || $invoice['email']): ?>
+                <form method="post" action="/notifications" class="form-grid compact-form">
+                    <?= csrf_field() ?><input type="hidden" name="_action" value="enqueue"><input type="hidden" name="invoice_id" value="<?= e($invoice['id']) ?>">
+                    <label>Kanal<select name="channel" required>
+                        <?php if ($invoice['phone'] !== ''): ?><option value="whatsapp">WhatsApp · <?= e($invoice['phone']) ?></option><?php endif; ?>
+                        <?php if ($invoice['email']): ?><option value="email">Email · <?= e($invoice['email']) ?></option><?php endif; ?>
+                    </select></label>
+                    <div class="form-action"><button class="button button-primary" type="submit">Masukkan antrean</button></div>
+                </form>
+            <?php else: ?>
+                <p class="muted">Tambahkan nomor WhatsApp atau email pelanggan sebelum membuat pengingat.</p>
+            <?php endif; ?>
+        </section>
+    <?php endif; ?>
     <?php if ($overdue && Auth::canManageBilling()): ?>
         <section class="panel notice-panel">
             <div class="section-heading"><div><h2>Denda keterlambatan</h2><p class="muted">Nilai yang dimasukkan menggantikan denda lama, sehingga aman jika formulir dikirim ulang.</p></div><span class="status status-overdue">overdue</span></div>
@@ -2221,6 +2441,17 @@ if ($path === '/invoices/view') {
             </form>
         </section>
     <?php endif; ?>
+    <section class="panel">
+        <div class="section-heading"><div><h2>Histori notifikasi</h2><p class="muted">Maksimal 20 antrean terbaru untuk invoice ini.</p></div></div>
+        <div class="table-wrap">
+            <table><thead><tr><th>Waktu</th><th>Kanal</th><th>Tujuan</th><th>Template</th><th>Status</th><th>Percobaan</th></tr></thead><tbody>
+                <?php if ($invoiceNotifications === []): ?><tr><td colspan="6" class="muted">Belum ada notifikasi.</td></tr><?php endif; ?>
+                <?php foreach ($invoiceNotifications as $notification): ?>
+                    <tr><td><?= e($notification['created_at']) ?></td><td><span class="role-badge"><?= e($notification['channel']) ?></span></td><td><?= e($notification['recipient']) ?></td><td><?= e($notification['template']) ?></td><td><span class="status status-<?= e($notification['status']) ?>"><?= e($notification['status']) ?></span></td><td><?= e($notification['attempts']) ?>/<?= e($notification['max_attempts']) ?></td></tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+    </section>
     <section class="panel">
         <div class="section-heading"><div><h2>Histori pembayaran</h2><p class="muted">Semua pencatatan pembayaran untuk invoice ini.</p></div></div>
         <div class="table-wrap">

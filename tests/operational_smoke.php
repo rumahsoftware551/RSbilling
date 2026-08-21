@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/app/BillingService.php';
 require_once dirname(__DIR__) . '/app/CsvService.php';
 require_once dirname(__DIR__) . '/app/CustomerImportService.php';
+require_once dirname(__DIR__) . '/app/NotificationService.php';
 require_once dirname(__DIR__) . '/app/Pagination.php';
 require_once dirname(__DIR__) . '/app/ReportService.php';
 
@@ -85,6 +86,29 @@ assert_operational(CsvService::safeCell('=2+2') === "'=2+2", 'Formula injection 
 assert_operational(CsvService::safeCell(" \t@SUM(A1:A2)") === "' \t@SUM(A1:A2)", 'Formula tersamar wajib dinetralkan.');
 assert_operational(CsvService::safeCell('Pelanggan Aman') === 'Pelanggan Aman', 'Sel CSV normal tidak boleh berubah.');
 
+assert_operational(
+    NotificationService::normalizeRecipient('whatsapp', '0812-3456-7890') === '6281234567890',
+    'Nomor WhatsApp lokal harus dinormalisasi ke format internasional.'
+);
+assert_operational(
+    NotificationService::normalizeRecipient('email', ' Billing@Example.COM ') === 'billing@example.com',
+    'Email tujuan harus divalidasi dan dinormalisasi.'
+);
+$notificationContent = NotificationService::composeInvoice([
+    'tenant_name' => 'ISP Uji',
+    'customer_name' => 'Pelanggan Uji',
+    'invoice_number' => 'INV-TEST-001',
+    'period_label' => 'Agustus 2099',
+    'amount' => '150000.00',
+    'due_date' => '2099-08-20',
+], 'whatsapp');
+assert_operational($notificationContent['template'] === 'invoice_reminder', 'Template pengingat invoice tidak sesuai.');
+assert_operational(
+    str_contains($notificationContent['message'], 'INV-TEST-001')
+        && str_contains($notificationContent['message'], 'Rp150.000'),
+    'Isi pesan invoice wajib memuat nomor dan total tagihan.'
+);
+
 $pagination = new Pagination(45, 3, 20);
 assert_operational($pagination->page === 3, 'Halaman aktif tidak sesuai.');
 assert_operational($pagination->offset() === 40, 'Offset pagination tidak sesuai.');
@@ -111,6 +135,12 @@ assert_operational(
 assert_operational(
     str_contains($schema, 'invoices_tenant_created_idx (tenant_id, created_at)'),
     'Index periode laporan invoice wajib tersedia.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS notification_outbox')
+        && str_contains($schema, 'notification_outbox_tenant_idempotency_unique (tenant_id, idempotency_key)')
+        && str_contains($schema, 'notification_outbox_tenant_queue_idx (tenant_id, status, available_at)'),
+    'Outbox notifikasi wajib memiliki isolasi tenant, idempotensi, dan index antrean.'
 );
 assert_operational(
     str_contains($installer, "if (!\$columnExists(\$db, 'invoices', 'base_amount'))")
@@ -163,6 +193,14 @@ assert_operational(
         && str_contains($routes, "if (\$path === '/reports/export' && \$method === 'GET')")
         && str_contains($routes, 'CsvService::writeRow'),
     'Import pelanggan dan export laporan CSV wajib tersedia serta diaudit.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/notifications' && \$method === 'POST')")
+        && str_contains($routes, 'NotificationService::enqueueInvoice(')
+        && str_contains($routes, 'NotificationService::cancelInvoiceNotifications(')
+        && str_contains($routes, "audit_event(\$db, 'notification.queued'")
+        && str_contains($routes, "if (\$path === '/notifications' && \$method === 'GET')"),
+    'Antrean notifikasi wajib memiliki enqueue, audit, dan halaman operasional.'
 );
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");
