@@ -40,10 +40,11 @@ Status: sedang dikerjakan pada branch `codex/security-runtime-hardening`.
 
 - [x] credential vault terenkripsi per tenant dengan AES-256-GCM;
 - [x] simulator perangkat tanpa socket atau koneksi jaringan eksternal;
+- [x] command queue simulator dengan idempotensi, row lock, retry eksponensial, stale recovery, dead-letter, dan audit;
 - integrasi MikroTik API nyata;
 - FreeRADIUS dan proyeksi `radcheck`/`radreply`;
 - suspend, disconnect, pembayaran, dan reaktivasi idempotent;
-- retry queue, dead-letter handling, serta audit perintah perangkat;
+- background worker permanen dengan monitoring serta graceful shutdown;
 - simulasi perangkat untuk test tanpa menyentuh jaringan produksi.
 
 ## Fase 4 — SaaS komersial

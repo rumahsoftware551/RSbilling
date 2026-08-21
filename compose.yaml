@@ -39,6 +39,7 @@ services:
       - ./config:/var/www/html/config:ro
       - ./database:/var/www/html/database:ro
       - ./public:/var/www/html/public:ro
+      - ./scripts:/var/www/html/scripts:ro
     networks:
       - backend
 

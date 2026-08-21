@@ -65,11 +65,11 @@ th, td { padding: .85rem .75rem; border-bottom: 1px solid var(--line); text-alig
 th { color: var(--muted); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; }
 td small { display: block; margin-top: .2rem; color: var(--muted); }
 .status { display: inline-flex; padding: .3rem .55rem; border-radius: 99px; color: #44506b; background: #eef1f6; font-size: .72rem; font-weight: 750; text-transform: capitalize; }
-.status-active, .status-paid, .status-sent, .status-posted, .status-success { color: var(--success); background: #eaf8f1; }
-.status-pending { color: #875300; background: #fff4d8; }
+.status-active, .status-paid, .status-sent, .status-posted, .status-success, .status-succeeded { color: var(--success); background: #eaf8f1; }
+.status-pending, .status-retry_scheduled { color: #875300; background: #fff4d8; }
 .status-processing, .status-matched { color: var(--blue); background: #eaf1ff; }
 .status-ignored { color: #566178; background: #eef1f6; }
-.status-unpaid, .status-suspended, .status-overdue, .status-disabled, .status-inactive, .status-cancelled, .status-terminated, .status-failed, .status-unmatched { color: var(--danger); background: #fff0f1; }
+.status-unpaid, .status-suspended, .status-overdue, .status-disabled, .status-inactive, .status-cancelled, .status-terminated, .status-failed, .status-unmatched, .status-dead_letter { color: var(--danger); background: #fff0f1; }
 .role-badge { display: inline-flex; padding: .3rem .55rem; border-radius: .5rem; color: #2354b5; background: #eaf1ff; font-size: .72rem; font-weight: 750; text-transform: capitalize; }
 .notice { margin-bottom: 1rem; padding: .9rem 1rem; border: 1px solid #f3d49a; border-radius: .75rem; color: #875300; background: #fff9eb; font-size: .88rem; }
 .detail-list { margin: 0; display: grid; gap: .2rem; }
@@ -129,6 +129,10 @@ td small { display: block; margin-top: .2rem; color: var(--muted); }
 .credential-rotate summary { color: var(--blue); font-size: .78rem; font-weight: 750; cursor: pointer; }
 .credential-rotate .stack-form { min-width: 230px; margin-top: .7rem; padding: .8rem; border: 1px solid var(--line); border-radius: .7rem; background: #fff; }
 .device-security { border-color: #bcebd8; background: #f8fffb; }
+.command-panel { margin-bottom: 1.2rem; border-color: #c9d9fb; background: #fbfdff; }
+.command-form { grid-template-columns: 1fr 1fr 1.4fr auto; align-items: end; }
+.command-stats { margin: 1.2rem 0 0; }
+.command-history { margin-top: 1.2rem; }
 .print-body { background: #eef2f7; }
 .invoice-print-shell { width: min(900px, 94vw); margin: 2rem auto; }
 .print-help { margin-bottom: 1rem; padding: 1rem 1.2rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border: 1px solid var(--line); border-radius: .8rem; background: #fff; }
@@ -164,8 +168,8 @@ td small { display: block; margin-top: .2rem; color: var(--muted); }
 .auth-mark { width: 50px; height: 50px; margin-bottom: 1.4rem; display: grid; place-items: center; border-radius: .9rem; color: #fff; background: linear-gradient(135deg, var(--blue), var(--cyan)); font-weight: 900; }
 .empty-state { padding: 4rem 2rem; text-align: center; }
 footer { padding: 1rem 5vw 2rem; color: var(--muted); font-size: .75rem; text-align: center; }
-@media (max-width: 900px) { .topbar { padding: 1rem 4vw; flex-wrap: wrap; gap: .8rem; } .topbar nav { order: 3; width: 100%; overflow-x: auto; } .account { margin-left: auto; } .stat-grid { grid-template-columns: repeat(2, 1fr); } .welcome-panel { align-items: flex-start; flex-direction: column; } .account-grid, .report-grid { grid-template-columns: 1fr; } .filter-form { grid-template-columns: repeat(2, 1fr); } .report-filter { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 560px) { .container { margin-top: 1.5rem; } .stat-grid, .form-grid, .filter-form, .compact-form, .invoice-meta-grid, .report-filter { grid-template-columns: 1fr; } .field-wide { grid-column: auto; } .account span { display: none; } .quick-actions { width: 100%; flex-direction: column; } .page-heading, .section-heading, .pagination-wrap, .print-help, .invoice-header, .invoice-footer { align-items: flex-start; gap: .8rem; flex-direction: column; } .invoice-number { align-items: flex-start; text-align: left; } .invoice-document { padding: 1.2rem; } .user-row-form { min-width: 250px; grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .topbar { padding: 1rem 4vw; flex-wrap: wrap; gap: .8rem; } .topbar nav { order: 3; width: 100%; overflow-x: auto; } .account { margin-left: auto; } .stat-grid { grid-template-columns: repeat(2, 1fr); } .welcome-panel { align-items: flex-start; flex-direction: column; } .account-grid, .report-grid { grid-template-columns: 1fr; } .filter-form, .command-form { grid-template-columns: repeat(2, 1fr); } .report-filter { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .container { margin-top: 1.5rem; } .stat-grid, .form-grid, .filter-form, .compact-form, .invoice-meta-grid, .report-filter, .command-form { grid-template-columns: 1fr; } .field-wide { grid-column: auto; } .account span { display: none; } .quick-actions { width: 100%; flex-direction: column; } .page-heading, .section-heading, .pagination-wrap, .print-help, .invoice-header, .invoice-footer { align-items: flex-start; gap: .8rem; flex-direction: column; } .invoice-number { align-items: flex-start; text-align: left; } .invoice-document { padding: 1.2rem; } .user-row-form { min-width: 250px; grid-template-columns: 1fr; } }
 @media print {
     @page { size: A4; margin: 12mm; }
     body.print-body { background: #fff; }

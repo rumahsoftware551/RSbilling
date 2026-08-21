@@ -6,6 +6,7 @@ require_once dirname(__DIR__) . '/app/BillingService.php';
 require_once dirname(__DIR__) . '/app/CsvService.php';
 require_once dirname(__DIR__) . '/app/CustomerImportService.php';
 require_once dirname(__DIR__) . '/app/CredentialVault.php';
+require_once dirname(__DIR__) . '/app/NetworkCommandService.php';
 require_once dirname(__DIR__) . '/app/NetworkDeviceService.php';
 require_once dirname(__DIR__) . '/app/NetworkDeviceSimulator.php';
 require_once dirname(__DIR__) . '/app/NotificationService.php';
@@ -97,6 +98,33 @@ assert_operational(
 assert_operational(
     !str_contains(json_encode($simulatorResult, JSON_THROW_ON_ERROR), $vaultCredentials['password']),
     'Hasil simulator tidak boleh membocorkan credential vault.'
+);
+$commandResult = NetworkDeviceSimulator::executeCommand([
+    'driver' => 'simulator',
+    'device_key' => '0123456789abcdef0123456789abcdef',
+    'use_tls' => 1,
+], $vaultCredentials, 'suspend_preview', 'CUST-001');
+assert_operational(
+    $commandResult['status'] === 'success'
+        && $commandResult['action'] === 'suspend_preview'
+        && $commandResult['target_reference'] === 'CUST-001'
+        && $commandResult['changed_network'] === false,
+    'Worker simulator wajib menghasilkan preview tanpa perubahan jaringan.'
+);
+assert_operational(
+    !str_contains(json_encode($commandResult, JSON_THROW_ON_ERROR), $vaultCredentials['password']),
+    'Hasil perintah simulator tidak boleh membocorkan credential vault.'
+);
+assert_operational(
+    NetworkCommandService::retryDelaySeconds(1) === 30
+        && NetworkCommandService::retryDelaySeconds(2) === 60
+        && NetworkCommandService::retryDelaySeconds(10) === 900,
+    'Retry perintah wajib eksponensial dan dibatasi maksimal 15 menit.'
+);
+assert_operational(
+    NetworkCommandService::validateTarget('health_check', '') === ''
+        && NetworkCommandService::validateTarget('provision_preview', 'CUST-001') === 'CUST-001',
+    'Target perintah wajib divalidasi sesuai jenis aksi.'
 );
 
 $invalidDiscountRejected = false;
@@ -212,6 +240,7 @@ assert_operational($pagination->from() === 41 && $pagination->to() === 45, 'Rent
 $schema = file_get_contents(dirname(__DIR__) . '/database/schema.sql') ?: '';
 $installer = file_get_contents(dirname(__DIR__) . '/database/install.php') ?: '';
 $routes = file_get_contents(dirname(__DIR__) . '/public/index.php') ?: '';
+$networkDeviceSource = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceService.php') ?: '';
 $envExample = file_get_contents(dirname(__DIR__) . '/.env.example') ?: '';
 assert_operational(
     str_contains($envExample, 'APP_TIMEZONE=Asia/Jakarta'),
@@ -249,6 +278,14 @@ assert_operational(
         && str_contains($schema, 'network_devices_tenant_name_unique (tenant_id, name)')
         && str_contains($schema, 'network_devices_tenant_status_idx (tenant_id, status)'),
     'Perangkat jaringan wajib memiliki credential ciphertext, isolasi tenant, dan index operasional.'
+);
+assert_operational(
+    str_contains($schema, 'CREATE TABLE IF NOT EXISTS network_commands')
+        && str_contains($schema, 'network_commands_tenant_idempotency_unique (tenant_id, idempotency_key)')
+        && str_contains($schema, 'network_commands_tenant_queue_idx (tenant_id, status, available_at)')
+        && str_contains($schema, "'retry_scheduled', 'dead_letter'")
+        && str_contains($schema, 'result_payload TEXT NULL'),
+    'Command queue wajib memiliki isolasi tenant, idempotensi, index worker, retry, dan dead-letter.'
 );
 assert_operational(
     str_contains($installer, "if (!\$columnExists(\$db, 'invoices', 'base_amount'))")
@@ -326,6 +363,20 @@ assert_operational(
         && str_contains($routes, "audit_event(\$db, 'network_device.created'")
         && str_contains($routes, "if (\$path === '/network-devices' && \$method === 'GET')"),
     'Perangkat jaringan wajib memiliki vault, simulator, audit, dan UI operasional.'
+);
+assert_operational(
+    str_contains($networkDeviceSource, "last_error = 'Perintah dibatalkan karena kredensial perangkat dirotasi.'")
+        && str_contains($networkDeviceSource, "last_error = 'Perintah dibatalkan karena perangkat dinonaktifkan.'"),
+    'Rotasi credential dan penonaktifan perangkat wajib membatalkan perintah tertunda.'
+);
+assert_operational(
+    str_contains($routes, "if (\$path === '/network-commands' && \$method === 'POST')")
+        && str_contains($routes, 'NetworkCommandService::enqueue(')
+        && str_contains($routes, 'NetworkCommandService::processDue(')
+        && str_contains($routes, "audit_event(\$db, 'network_command.worker_run'")
+        && str_contains($routes, 'Antrean perintah simulator')
+        && str_contains($routes, 'Riwayat perintah'),
+    'Command queue wajib memiliki enqueue, worker simulator, audit, dan UI operasional.'
 );
 
 fwrite(STDOUT, "Operational smoke test lulus.\n");

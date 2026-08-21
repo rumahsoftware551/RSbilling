@@ -225,6 +225,36 @@ CREATE TABLE IF NOT EXISTS network_devices (
     CONSTRAINT network_devices_updated_user_fk FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS network_commands (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id BIGINT UNSIGNED NOT NULL,
+    network_device_id BIGINT UNSIGNED NOT NULL,
+    command_key CHAR(32) NOT NULL,
+    idempotency_key CHAR(64) NOT NULL,
+    action ENUM('health_check', 'provision_preview', 'suspend_preview', 'reactivate_preview') NOT NULL,
+    target_reference VARCHAR(120) NULL,
+    status ENUM('pending', 'processing', 'succeeded', 'retry_scheduled', 'dead_letter', 'cancelled')
+        NOT NULL DEFAULT 'pending',
+    attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    max_attempts SMALLINT UNSIGNED NOT NULL DEFAULT 3,
+    available_at DATETIME NOT NULL,
+    locked_at DATETIME NULL,
+    completed_at DATETIME NULL,
+    result_payload TEXT NULL,
+    last_error VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY network_commands_tenant_command_unique (tenant_id, command_key),
+    UNIQUE KEY network_commands_tenant_idempotency_unique (tenant_id, idempotency_key),
+    KEY network_commands_tenant_queue_idx (tenant_id, status, available_at),
+    KEY network_commands_device_idx (network_device_id),
+    CONSTRAINT network_commands_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
+    CONSTRAINT network_commands_device_fk FOREIGN KEY (network_device_id) REFERENCES network_devices (id) ON DELETE RESTRICT,
+    CONSTRAINT network_commands_created_user_fk FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     tenant_id BIGINT UNSIGNED NOT NULL,

@@ -96,6 +96,14 @@ final class NetworkDeviceService
         if ($update->rowCount() !== 1) {
             throw new RuntimeException('Rotasi credential vault gagal disimpan.');
         }
+        $cancelCommands = $db->prepare(
+            "UPDATE network_commands
+             SET status = 'cancelled', completed_at = NOW(), locked_at = NULL,
+                 last_error = 'Perintah dibatalkan karena kredensial perangkat dirotasi.'
+             WHERE tenant_id = :tenant_id AND network_device_id = :network_device_id
+               AND status IN ('pending', 'retry_scheduled')"
+        );
+        $cancelCommands->execute(['tenant_id' => $tenantId, 'network_device_id' => $deviceId]);
     }
 
     public static function testSimulator(
@@ -122,10 +130,7 @@ final class NetworkDeviceService
             throw new DomainException('Aktifkan kembali perangkat sebelum menjalankan simulator.');
         }
 
-        $credentials = $vault->decrypt(
-            (string) $device['credential_ciphertext'],
-            self::aad($tenantId, (string) $device['device_key'])
-        );
+        $credentials = self::decryptCredentials($vault, $tenantId, $device);
         $result = NetworkDeviceSimulator::probe($device, $credentials);
         $message = substr((string) $result['message'], 0, 190);
 
@@ -168,6 +173,16 @@ final class NetworkDeviceService
         ]);
         if ($update->rowCount() !== 1) {
             throw new DomainException('Perangkat tidak ditemukan atau statusnya sudah sama.');
+        }
+        if ($disabled) {
+            $cancelCommands = $db->prepare(
+                "UPDATE network_commands
+                 SET status = 'cancelled', completed_at = NOW(), locked_at = NULL,
+                     last_error = 'Perintah dibatalkan karena perangkat dinonaktifkan.'
+                 WHERE tenant_id = :tenant_id AND network_device_id = :network_device_id
+                   AND status IN ('pending', 'retry_scheduled')"
+            );
+            $cancelCommands->execute(['tenant_id' => $tenantId, 'network_device_id' => $deviceId]);
         }
         return $status;
     }
@@ -220,6 +235,22 @@ final class NetworkDeviceService
         }
 
         return ['username' => $username, 'password' => $password];
+    }
+
+    public static function decryptCredentials(
+        CredentialVault $vault,
+        int $tenantId,
+        array $device
+    ): array {
+        if (!is_string($device['device_key'] ?? null)
+            || !is_string($device['credential_ciphertext'] ?? null)) {
+            throw new RuntimeException('Data credential vault perangkat tidak lengkap.');
+        }
+
+        return self::validateCredentials($vault->decrypt(
+            $device['credential_ciphertext'],
+            self::aad($tenantId, $device['device_key'])
+        ));
     }
 
     private static function aad(int $tenantId, string $deviceKey): string

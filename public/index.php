@@ -1062,6 +1062,103 @@ if ($path === '/network-devices' && $method === 'POST') {
     redirect('/network-devices');
 }
 
+if ($path === '/network-commands' && $method === 'POST') {
+    Auth::requireNetworkAccess();
+    verify_csrf();
+    $action = input('_action');
+    if (!in_array($action, ['enqueue', 'process', 'retry', 'cancel'], true)) {
+        flash('error', 'Aksi antrean perangkat tidak valid.');
+        redirect('/network-devices');
+    }
+
+    try {
+        if ($action === 'enqueue') {
+            $deviceId = filter_var(input('device_id'), FILTER_VALIDATE_INT);
+            if (!$deviceId) {
+                throw new InvalidArgumentException('Perangkat tujuan perintah tidak valid.');
+            }
+
+            $db->beginTransaction();
+            $result = NetworkCommandService::enqueue(
+                $db,
+                $tenantId,
+                (int) Auth::user()['id'],
+                (int) $deviceId,
+                input('command_action'),
+                input('target_reference'),
+                input('request_token')
+            );
+            audit_event(
+                $db,
+                $result['created'] ? 'network_command.enqueued' : 'network_command.duplicate_ignored',
+                'network_command',
+                $result['id'],
+                [
+                    'command_key' => $result['command_key'],
+                    'action' => $result['action'],
+                    'target_reference' => $result['target_reference'],
+                    'device_name' => $result['device_name'],
+                ]
+            );
+            $db->commit();
+            $message = $result['created']
+                ? 'Perintah simulator berhasil masuk antrean.'
+                : 'Pengiriman ulang terdeteksi; perintah lama dipakai tanpa membuat duplikat.';
+        } elseif ($action === 'process') {
+            $summary = NetworkCommandService::processDue(
+                $db,
+                CredentialVault::fromEnvironment(),
+                $tenantId,
+                10
+            );
+            audit_event($db, 'network_command.worker_run', 'network_command_batch', null, [
+                'processed' => $summary['processed'],
+                'succeeded' => $summary['succeeded'],
+                'retry_scheduled' => $summary['retry_scheduled'],
+                'dead_letter' => $summary['dead_letter'],
+            ]);
+            $message = sprintf(
+                'Worker simulator selesai: %d diproses, %d sukses, %d retry, %d dead-letter.',
+                $summary['processed'],
+                $summary['succeeded'],
+                $summary['retry_scheduled'],
+                $summary['dead_letter']
+            );
+        } else {
+            $commandId = filter_var(input('command_id'), FILTER_VALIDATE_INT);
+            if (!$commandId) {
+                throw new InvalidArgumentException('Perintah jaringan tidak valid.');
+            }
+
+            $db->beginTransaction();
+            if ($action === 'retry') {
+                NetworkCommandService::retryDeadLetter($db, $tenantId, (int) $commandId);
+                $auditAction = 'network_command.retried';
+                $message = 'Perintah dead-letter berhasil dikembalikan ke antrean.';
+            } else {
+                NetworkCommandService::cancel($db, $tenantId, (int) $commandId);
+                $auditAction = 'network_command.cancelled';
+                $message = 'Perintah yang belum diproses berhasil dibatalkan.';
+            }
+            audit_event($db, $auditAction, 'network_command', (int) $commandId);
+            $db->commit();
+        }
+
+        flash('success', $message);
+    } catch (InvalidArgumentException | DomainException $exception) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        flash('error', $exception->getMessage());
+    } catch (Throwable $exception) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $exception;
+    }
+    redirect('/network-devices');
+}
+
 if ($path === '/network-devices' && $method === 'GET') {
     Auth::requireNetworkAccess();
     $vaultConfigured = CredentialVault::isConfigured();
@@ -1083,6 +1180,48 @@ if ($path === '/network-devices' && $method === 'GET') {
             $deviceCounts[(string) $device['status']]++;
         }
     }
+    $activeSimulators = array_values(array_filter(
+        $devices,
+        static fn (array $device): bool => $device['driver'] === 'simulator' && $device['status'] === 'active'
+    ));
+
+    $commandQuery = $db->prepare(
+        'SELECT c.id, c.command_key, c.action, c.target_reference, c.status, c.attempts,
+                c.max_attempts, c.available_at, c.completed_at, c.result_payload, c.last_error,
+                c.created_at, d.name AS device_name, creator.name AS created_by_name
+         FROM network_commands c
+         INNER JOIN network_devices d
+            ON d.id = c.network_device_id AND d.tenant_id = c.tenant_id
+         INNER JOIN users creator ON creator.id = c.created_by
+         WHERE c.tenant_id = :tenant_id
+         ORDER BY c.id DESC LIMIT 100'
+    );
+    $commandQuery->execute(['tenant_id' => $tenantId]);
+    $commands = $commandQuery->fetchAll();
+    $commandCounts = [
+        'pending' => 0,
+        'processing' => 0,
+        'succeeded' => 0,
+        'retry_scheduled' => 0,
+        'dead_letter' => 0,
+        'cancelled' => 0,
+    ];
+    $commandCountQuery = $db->prepare(
+        'SELECT status, COUNT(*) AS total FROM network_commands
+         WHERE tenant_id = :tenant_id GROUP BY status'
+    );
+    $commandCountQuery->execute(['tenant_id' => $tenantId]);
+    foreach ($commandCountQuery->fetchAll() as $commandCount) {
+        if (isset($commandCounts[(string) $commandCount['status']])) {
+            $commandCounts[(string) $commandCount['status']] = (int) $commandCount['total'];
+        }
+    }
+    $commandLabels = [
+        'health_check' => 'Health check',
+        'provision_preview' => 'Preview provisioning',
+        'suspend_preview' => 'Preview suspend',
+        'reactivate_preview' => 'Preview reaktivasi',
+    ];
 
     View::header('Perangkat Jaringan');
     ?>
@@ -1131,6 +1270,54 @@ if ($path === '/network-devices' && $method === 'GET') {
             </dl>
         </article>
     </section>
+    <section class="panel command-panel">
+        <div class="section-heading">
+            <div>
+                <h2>Antrean perintah simulator</h2>
+                <p class="muted">Perintah memakai idempotensi, maksimal tiga percobaan, retry eksponensial, dan dead-letter. Tidak ada perubahan jaringan nyata.</p>
+            </div>
+            <?php if ($vaultConfigured): ?>
+                <form method="post" action="/network-commands" class="inline-form">
+                    <?= csrf_field() ?><input type="hidden" name="_action" value="process">
+                    <button class="button button-secondary" type="submit">Proses maksimal 10</button>
+                </form>
+            <?php endif; ?>
+        </div>
+        <?php if ($activeSimulators !== []): ?>
+            <form method="post" action="/network-commands" class="form-grid command-form">
+                <?= csrf_field() ?>
+                <input type="hidden" name="_action" value="enqueue">
+                <input type="hidden" name="request_token" value="<?= e(bin2hex(random_bytes(16))) ?>">
+                <label>Simulator aktif
+                    <select name="device_id" required>
+                        <?php foreach ($activeSimulators as $device): ?>
+                            <option value="<?= e($device['id']) ?>"><?= e($device['name']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>Perintah
+                    <select name="command_action" required>
+                        <option value="health_check">Health check</option>
+                        <option value="provision_preview">Preview provisioning</option>
+                        <option value="suspend_preview">Preview suspend</option>
+                        <option value="reactivate_preview">Preview reaktivasi</option>
+                    </select>
+                </label>
+                <label>Kode pelanggan target
+                    <input type="text" name="target_reference" maxlength="120" placeholder="Contoh: CUST-001 (kosong untuk health check)">
+                </label>
+                <div class="form-action"><button class="button button-primary" type="submit">Masukkan antrean</button></div>
+            </form>
+        <?php else: ?>
+            <p class="muted">Aktifkan dan uji satu simulator terlebih dahulu sebelum membuat perintah.</p>
+        <?php endif; ?>
+        <div class="stat-grid command-stats">
+            <article class="stat-card"><span>Menunggu</span><strong><?= e($commandCounts['pending'] + $commandCounts['retry_scheduled']) ?></strong><small>Pending dan retry</small></article>
+            <article class="stat-card"><span>Diproses</span><strong><?= e($commandCounts['processing']) ?></strong><small>Row lock aktif</small></article>
+            <article class="stat-card"><span>Berhasil</span><strong><?= e($commandCounts['succeeded']) ?></strong><small>Simulator saja</small></article>
+            <article class="stat-card"><span>Dead-letter</span><strong><?= e($commandCounts['dead_letter']) ?></strong><small>Perlu pemeriksaan manual</small></article>
+        </div>
+    </section>
     <section class="panel">
         <div class="section-heading"><div><h2>Daftar perangkat</h2><p class="muted">Konfigurasi disimpan per tenant. Perangkat MikroTik nyata tetap inactive sampai adapter resmi tersedia.</p></div></div>
         <div class="table-wrap">
@@ -1148,6 +1335,41 @@ if ($path === '/network-devices' && $method === 'GET') {
                             <?php if ($device['driver'] === 'mikrotik'): ?><span class="muted">Adapter belum aktif</span><?php endif; ?>
                             <?php if ($device['status'] === 'disabled'): ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="enable"><input type="hidden" name="device_id" value="<?= e($device['id']) ?>"><button class="button button-link" type="submit">Aktifkan kembali</button></form><?php else: ?><form method="post" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="disable"><input type="hidden" name="device_id" value="<?= e($device['id']) ?>"><button class="button button-danger" type="submit">Nonaktifkan</button></form><?php endif; ?>
                             <?php if ($vaultConfigured): ?><details class="credential-rotate"><summary>Rotasi kredensial</summary><form method="post" class="stack-form"><?= csrf_field() ?><input type="hidden" name="_action" value="rotate"><input type="hidden" name="device_id" value="<?= e($device['id']) ?>"><label>Username baru<input type="text" name="username" maxlength="120" autocomplete="off" required></label><label>Password baru<input type="password" name="password" minlength="8" maxlength="255" autocomplete="new-password" required></label><button class="button button-secondary" type="submit">Simpan rotasi</button></form></details><?php endif; ?>
+                        </div></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody></table>
+        </div>
+    </section>
+    <section class="panel command-history">
+        <div class="section-heading">
+            <div><h2>Riwayat perintah</h2><p class="muted">Maksimal 100 perintah terbaru. Hasil tidak pernah memuat username atau password perangkat.</p></div>
+        </div>
+        <div class="table-wrap">
+            <table><thead><tr><th>Dibuat</th><th>Perangkat</th><th>Perintah</th><th>Target</th><th>Status</th><th>Hasil aman</th><th>Aksi</th></tr></thead><tbody>
+                <?php if ($commands === []): ?><tr><td colspan="7" class="muted">Belum ada perintah simulator.</td></tr><?php endif; ?>
+                <?php foreach ($commands as $command): ?>
+                    <?php
+                    $resultPayload = is_string($command['result_payload'])
+                        ? json_decode($command['result_payload'], true)
+                        : null;
+                    $resultMessage = is_array($resultPayload) && is_string($resultPayload['message'] ?? null)
+                        ? $resultPayload['message']
+                        : null;
+                    $resultReference = is_array($resultPayload) && is_string($resultPayload['command_reference'] ?? null)
+                        ? $resultPayload['command_reference']
+                        : null;
+                    ?>
+                    <tr>
+                        <td><?= e($command['created_at']) ?><small><?= e($command['created_by_name']) ?></small></td>
+                        <td><strong><?= e($command['device_name']) ?></strong><small><?= e($command['command_key']) ?></small></td>
+                        <td><?= e($commandLabels[$command['action']] ?? $command['action']) ?></td>
+                        <td><?= e($command['target_reference'] ?: '—') ?></td>
+                        <td><span class="status status-<?= e($command['status']) ?>"><?= e(str_replace('_', ' ', $command['status'])) ?></span><small>Percobaan <?= e($command['attempts']) ?>/<?= e($command['max_attempts']) ?></small><?php if ($command['status'] === 'retry_scheduled'): ?><small>Berikutnya <?= e($command['available_at']) ?></small><?php endif; ?></td>
+                        <td><?php if ($resultReference): ?><strong><?= e($resultReference) ?></strong><?php endif; ?><?php if ($resultMessage): ?><small><?= e($resultMessage) ?></small><?php elseif ($command['last_error']): ?><small class="error-text"><?= e($command['last_error']) ?></small><?php else: ?>—<?php endif; ?></td>
+                        <td><div class="action-group">
+                            <?php if ($command['status'] === 'dead_letter'): ?><form method="post" action="/network-commands" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="retry"><input type="hidden" name="command_id" value="<?= e($command['id']) ?>"><button class="button button-link" type="submit">Ulangi</button></form><?php endif; ?>
+                            <?php if (in_array($command['status'], ['pending', 'retry_scheduled'], true)): ?><form method="post" action="/network-commands" class="inline-form"><?= csrf_field() ?><input type="hidden" name="_action" value="cancel"><input type="hidden" name="command_id" value="<?= e($command['id']) ?>"><button class="button button-danger" type="submit">Batalkan</button></form><?php endif; ?>
                         </div></td>
                     </tr>
                 <?php endforeach; ?>

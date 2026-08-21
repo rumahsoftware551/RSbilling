@@ -45,10 +45,12 @@ Checklist ini diperbarui setiap kali satu milestone selesai dan telah melewati p
 
 - [x] penyimpanan credential MikroTik terenkripsi per tenant dengan authenticated encryption
 - [x] simulator perangkat tanpa koneksi jaringan eksternal
+- [x] command queue simulator tenant-safe dengan idempotensi dan row lock
+- [x] retry eksponensial, pemulihan worker stale, dead-letter, dan audit perintah
 - [ ] integrasi MikroTik API
 - [ ] FreeRADIUS dan proyeksi `radcheck`/`radreply`
 - [ ] suspend, disconnect, dan reaktivasi idempotent
-- [ ] retry queue dan dead-letter handling
+- [ ] background worker permanen dengan monitoring dan graceful shutdown
 
 ## Fase 4 — SaaS komersial
 

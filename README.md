@@ -25,6 +25,7 @@ Sudah tersedia:
 - notification outbox WhatsApp/email per tenant dengan template invoice, idempotensi, retry, auto-cancel saat invoice selesai, dan audit;
 - rekonsiliasi pembayaran CSV dengan staging, exact-match invoice/nominal, posting atomik, serta pencegahan referensi duplikat;
 - credential vault perangkat jaringan terenkripsi per tenant dan simulator aman tanpa koneksi eksternal;
+- antrean perintah simulator tenant-safe dengan idempotensi, row lock, retry eksponensial, dead-letter, dan audit;
 - penerbitan tagihan manual dan generator tagihan bulanan idempotent;
 - filter periode/status tagihan, pembatalan tagihan belum dibayar, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
@@ -34,6 +35,17 @@ Sudah tersedia:
 Source lama tetap berada di `netbill-master/` sebagai referensi migrasi. Konfigurasi Nginx hanya melayani folder `public/`, sehingga source lama dan file konfigurasi tidak dapat diakses dari browser.
 
 Antrean notifikasi pada fase ini belum mengirim pesan ke provider eksternal. Pesan disimpan sebagai outbox internal sampai adapter WhatsApp/email, worker, dan kredensial tenant dikonfigurasi serta diuji.
+
+Antrean perangkat hanya mengeksekusi simulator. Worker menolak driver MikroTik, tidak membuka socket,
+dan tidak mengubah jaringan. Owner/admin dapat memproses maksimal 10 perintah dari UI. Untuk eksekusi
+satu kali dari terminal container gunakan:
+
+```bash
+docker compose exec app php scripts/network_worker.php
+```
+
+Nilai opsional `NETWORK_WORKER_LIMIT` membatasi 1–50 pekerjaan per eksekusi. Jangan menjalankan worker
+sebagai loop permanen sebelum monitoring, restart policy worker, dan UAT tenant selesai.
 
 ## Menjalankan secara lokal
 

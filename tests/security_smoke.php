@@ -25,7 +25,9 @@ $notificationService = file_get_contents(dirname(__DIR__) . '/app/NotificationSe
 $reconciliationService = file_get_contents(dirname(__DIR__) . '/app/PaymentReconciliationService.php') ?: '';
 $credentialVault = file_get_contents(dirname(__DIR__) . '/app/CredentialVault.php') ?: '';
 $networkDeviceService = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceService.php') ?: '';
+$networkCommandService = file_get_contents(dirname(__DIR__) . '/app/NetworkCommandService.php') ?: '';
 $networkSimulator = file_get_contents(dirname(__DIR__) . '/app/NetworkDeviceSimulator.php') ?: '';
+$networkWorker = file_get_contents(dirname(__DIR__) . '/scripts/network_worker.php') ?: '';
 
 expect(str_contains($auth, 'password_verify'), 'Login wajib memakai password_verify.');
 expect(str_contains($auth, 'session_regenerate_id(true)'), 'Login wajib meregenerasi session ID.');
@@ -89,6 +91,24 @@ expect(
         && str_contains($networkDeviceService, "'rsbilling|network-device|v1|'")
         && !preg_match('/\b(curl_|fsockopen|stream_socket_client|socket_create|gethostbyname)\s*\(/', $networkSimulator),
     'Vault wajib memakai authenticated encryption dan simulator tidak boleh membuka koneksi jaringan.'
+);
+expect(
+    str_contains($routes, "if (\$path === '/network-commands' && \$method === 'POST') {\n    Auth::requireNetworkAccess();\n    verify_csrf();")
+        && str_contains($networkCommandService, 'WHERE id = :id AND tenant_id = :tenant_id LIMIT 1')
+        && str_contains($networkCommandService, 'WHERE tenant_id = :tenant_id AND customer_code = :customer_code LIMIT 1')
+        && str_contains($networkCommandService, 'LIMIT 1 FOR UPDATE')
+        && str_contains($networkCommandService, "status IN ('pending', 'retry_scheduled')")
+        && str_contains($schema, 'network_commands_tenant_idempotency_unique (tenant_id, idempotency_key)')
+        && str_contains($schema, 'network_commands_tenant_queue_idx (tenant_id, status, available_at)'),
+    'Command queue wajib dibatasi role/CSRF, tenant scope, row lock, status, dan idempotensi.'
+);
+expect(
+    str_contains($networkCommandService, "'dead_letter'")
+        && str_contains($networkCommandService, 'recoverStale(')
+        && str_contains($networkCommandService, 'retryDelaySeconds(')
+        && str_contains($networkWorker, 'CredentialVault::fromEnvironment()')
+        && !preg_match('/\b(curl_|fsockopen|stream_socket_client|socket_create|gethostbyname)\s*\(/', $networkCommandService . $networkWorker),
+    'Worker simulator wajib memiliki retry/dead-letter tanpa primitive koneksi jaringan.'
 );
 
 $paths = [dirname(__DIR__) . '/app', dirname(__DIR__) . '/public', dirname(__DIR__) . '/database'];
