@@ -27,6 +27,8 @@ final class View
             <a href="/customers">Pelanggan</a>
             <a href="/plans">Paket</a>
             <a href="/invoices">Tagihan</a>
+            <?php if (Auth::canManageUsers()): ?><a href="/users">Pengguna</a><?php endif; ?>
+            <a href="/account">Akun Saya</a>
         </nav>
         <div class="account">
             <span><strong><?= e($user['tenant_name'] ?? '') ?></strong><small><?= e($user['name'] ?? '') ?></small></span>

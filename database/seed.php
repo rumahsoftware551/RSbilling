@@ -10,20 +10,14 @@ $adminName = trim((string) env('ADMIN_NAME', ''));
 $adminEmail = strtolower(trim((string) env('ADMIN_EMAIL', '')));
 $adminPassword = (string) env('ADMIN_PASSWORD', '');
 
-$blockedPasswords = [
-    'GANTI_DENGAN_PASSWORD_ADMIN_KUAT',
-    'ChangeMe123!',
-    'Admin@12345',
-];
-
 if ($tenantName === '' || !preg_match('/^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$/', $tenantSlug)) {
     throw new RuntimeException('ADMIN_TENANT_NAME atau ADMIN_TENANT_SLUG tidak valid.');
 }
 if ($adminName === '' || !filter_var($adminEmail, FILTER_VALIDATE_EMAIL)) {
     throw new RuntimeException('ADMIN_NAME atau ADMIN_EMAIL tidak valid.');
 }
-if (strlen($adminPassword) < 12 || in_array($adminPassword, $blockedPasswords, true)) {
-    throw new RuntimeException('ADMIN_PASSWORD wajib unik dan minimal 12 karakter; jangan gunakan nilai contoh.');
+if (!PasswordPolicy::isAcceptable($adminPassword)) {
+    throw new RuntimeException('ADMIN_PASSWORD tidak valid. ' . PasswordPolicy::requirement());
 }
 
 $db = Database::connection();
@@ -44,7 +38,8 @@ try {
     $created = false;
     if (!$userId) {
         $insertUser = $db->prepare(
-            'INSERT INTO users (name, email, password_hash) VALUES (:name, :email, :password_hash)'
+            'INSERT INTO users (name, email, password_hash, must_change_password)
+             VALUES (:name, :email, :password_hash, 0)'
         );
         $insertUser->execute([
             'name' => $adminName,
@@ -56,9 +51,9 @@ try {
     }
 
     $membership = $db->prepare(
-        "INSERT INTO tenant_users (tenant_id, user_id, role)
-         VALUES (:tenant_id, :user_id, 'owner')
-         ON DUPLICATE KEY UPDATE role = VALUES(role)"
+        "INSERT INTO tenant_users (tenant_id, user_id, role, status)
+         VALUES (:tenant_id, :user_id, 'owner', 'active')
+         ON DUPLICATE KEY UPDATE role = VALUES(role), status = VALUES(status)"
     );
     $membership->execute(['tenant_id' => $tenantId, 'user_id' => $userId]);
 

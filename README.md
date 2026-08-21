@@ -12,6 +12,9 @@ Sudah tersedia:
 - query PDO prepared statements;
 - isolasi data menggunakan `tenant_id` untuk setiap ISP;
 - role awal: owner, admin, billing, support, dan viewer;
+- menu pengelolaan pengguna tenant untuk owner/admin dengan pencegahan eskalasi role;
+- penggantian password mandiri dan kewajiban mengganti password sementara pada login pertama;
+- penonaktifan akses staf per ISP tanpa memengaruhi tenant lain;
 - master paket, pelanggan, penerbitan tagihan, dan pencatatan pembayaran manual;
 - audit log untuk perubahan data penting;
 - runtime Docker dengan Nginx, PHP-FPM 8.3, dan MariaDB 11.4;
@@ -47,6 +50,8 @@ Jalankan aplikasi:
 docker compose up -d --build
 docker compose ps
 ```
+
+Saat versi aplikasi diperbarui, jalankan kembali `docker compose up -d --build`. Installer akan menambahkan kolom skema baru secara idempotent tanpa menghapus data yang sudah ada.
 
 Buka `http://localhost:8080`. Endpoint pemeriksaan layanan tersedia di `http://localhost:8080/health`. Tidak ada username atau password demo yang ditanam di source code.
 

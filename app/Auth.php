@@ -10,6 +10,9 @@ final class Auth
     {
         $db = Database::connection();
         $email = strtolower(trim($email));
+        if (strlen($email) > 190 || strlen($password) > 128) {
+            return false;
+        }
         $attemptKey = hash('sha256', $email . '|' . $ipAddress);
 
         $db->prepare('DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)')->execute();
@@ -22,12 +25,14 @@ final class Auth
         }
 
         $query = $db->prepare(
-            "SELECT u.id, u.name, u.email, u.password_hash, tu.role,
+            "SELECT u.id, u.name, u.email, u.password_hash, u.must_change_password,
+                    tu.role, tu.status AS membership_status,
                     t.id AS tenant_id, t.name AS tenant_name, t.slug AS tenant_slug
              FROM users u
              INNER JOIN tenant_users tu ON tu.user_id = u.id
              INNER JOIN tenants t ON t.id = tu.tenant_id
-             WHERE u.email = :email AND u.status = 'active' AND t.status = 'active'
+             WHERE u.email = :email AND u.status = 'active'
+               AND tu.status = 'active' AND t.status = 'active'
              ORDER BY tu.id ASC
              LIMIT 1"
         );
@@ -72,6 +77,32 @@ final class Auth
             flash('error', 'Silakan masuk untuk melanjutkan.');
             redirect('/login');
         }
+
+        $user = self::user();
+        $authorization = Database::connection()->prepare(
+            "SELECT u.name, u.email, u.must_change_password, tu.role,
+                    t.name AS tenant_name, t.slug AS tenant_slug
+             FROM users u
+             INNER JOIN tenant_users tu ON tu.user_id = u.id
+             INNER JOIN tenants t ON t.id = tu.tenant_id
+             WHERE u.id = :user_id AND t.id = :tenant_id
+               AND u.status = 'active' AND tu.status = 'active' AND t.status = 'active'
+             LIMIT 1"
+        );
+        $authorization->execute([
+            'user_id' => (int) $user['id'],
+            'tenant_id' => (int) $user['tenant_id'],
+        ]);
+        $current = $authorization->fetch();
+
+        if (!$current) {
+            self::logout();
+            session_start();
+            flash('error', 'Akses akun telah dinonaktifkan. Hubungi administrator ISP.');
+            redirect('/login');
+        }
+
+        $_SESSION['auth'] = array_merge($user, $current);
     }
 
     public static function user(): array
@@ -89,12 +120,26 @@ final class Auth
         return in_array((string) ($_SESSION['auth']['role'] ?? ''), ['owner', 'admin', 'billing'], true);
     }
 
+    public static function canManageUsers(): bool
+    {
+        return in_array((string) ($_SESSION['auth']['role'] ?? ''), ['owner', 'admin'], true);
+    }
+
     public static function requireBillingAccess(): void
     {
         self::requireLogin();
         if (!self::canManageBilling()) {
             http_response_code(403);
             exit('Anda tidak memiliki izin untuk mengubah data billing.');
+        }
+    }
+
+    public static function requireUserManagement(): void
+    {
+        self::requireLogin();
+        if (!self::canManageUsers()) {
+            http_response_code(403);
+            exit('Anda tidak memiliki izin untuk mengelola pengguna.');
         }
     }
 

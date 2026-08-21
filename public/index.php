@@ -50,7 +50,7 @@ if ($path === '/login' && $method === 'GET') {
                 <input type="email" name="email" autocomplete="username" maxlength="190" required autofocus>
             </label>
             <label>Password
-                <input type="password" name="password" autocomplete="current-password" required>
+                <input type="password" name="password" autocomplete="current-password" maxlength="128" required>
             </label>
             <button class="button button-primary button-full" type="submit">Masuk aman</button>
         </form>
@@ -82,6 +82,205 @@ if ($path === '/logout' && $method === 'POST') {
 
 Auth::requireLogin();
 $tenantId = Auth::tenantId();
+
+if ((int) (Auth::user()['must_change_password'] ?? 0) === 1
+    && !in_array($path, ['/account', '/account/password'], true)) {
+    flash('error', 'Ganti password sementara sebelum menggunakan aplikasi.');
+    redirect('/account');
+}
+
+if ($path === '/account/password' && $method === 'POST') {
+    verify_csrf();
+    $currentPassword = input('current_password');
+    $newPassword = input('new_password');
+    $confirmation = input('new_password_confirmation');
+
+    if (!hash_equals($newPassword, $confirmation)) {
+        flash('error', 'Konfirmasi password baru tidak sama.');
+        redirect('/account');
+    }
+    if (!PasswordPolicy::isAcceptable($newPassword)) {
+        flash('error', PasswordPolicy::requirement());
+        redirect('/account');
+    }
+
+    $user = Auth::user();
+    $passwordQuery = $db->prepare(
+        "SELECT u.password_hash
+         FROM users u
+         INNER JOIN tenant_users tu ON tu.user_id = u.id
+         WHERE u.id = :user_id AND tu.tenant_id = :tenant_id AND tu.status = 'active'
+         LIMIT 1"
+    );
+    $passwordQuery->execute([
+        'user_id' => (int) $user['id'],
+        'tenant_id' => $tenantId,
+    ]);
+    $passwordHash = $passwordQuery->fetchColumn();
+
+    if (!$passwordHash || !password_verify($currentPassword, (string) $passwordHash)) {
+        flash('error', 'Password saat ini tidak benar.');
+        redirect('/account');
+    }
+    if (password_verify($newPassword, (string) $passwordHash)) {
+        flash('error', 'Password baru harus berbeda dari password saat ini.');
+        redirect('/account');
+    }
+
+    $db->beginTransaction();
+    try {
+        $updatePassword = $db->prepare(
+            'UPDATE users SET password_hash = :password_hash, must_change_password = 0 WHERE id = :user_id'
+        );
+        $updatePassword->execute([
+            'password_hash' => password_hash($newPassword, PASSWORD_DEFAULT),
+            'user_id' => (int) $user['id'],
+        ]);
+        audit_event($db, 'account.password_changed', 'user', (int) $user['id']);
+        $db->commit();
+    } catch (Throwable $exception) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $exception;
+    }
+    $_SESSION['auth']['must_change_password'] = 0;
+    flash('success', 'Password berhasil diperbarui.');
+    redirect('/account');
+}
+
+if ($path === '/users' && $method === 'POST') {
+    Auth::requireUserManagement();
+    verify_csrf();
+    $operator = Auth::user();
+    $operatorRole = (string) ($operator['role'] ?? '');
+    $assignableRoles = $operatorRole === 'owner'
+        ? ['admin', 'billing', 'support', 'viewer']
+        : ['billing', 'support', 'viewer'];
+    $action = input('_action', 'create');
+
+    if ($action === 'create') {
+        $name = input('name');
+        $email = strtolower(input('email'));
+        $password = input('password');
+        $role = input('role');
+
+        if ($name === '' || strlen($name) > 120 || !filter_var($email, FILTER_VALIDATE_EMAIL)
+            || strlen($email) > 190 || !in_array($role, $assignableRoles, true)) {
+            flash('error', 'Nama, email, atau role pengguna tidak valid.');
+            redirect('/users');
+        }
+        if (!PasswordPolicy::isAcceptable($password)) {
+            flash('error', PasswordPolicy::requirement());
+            redirect('/users');
+        }
+
+        $db->beginTransaction();
+        try {
+            $existing = $db->prepare('SELECT id FROM users WHERE email = :email LIMIT 1');
+            $existing->execute(['email' => $email]);
+            if ($existing->fetchColumn()) {
+                throw new DomainException('Email sudah digunakan oleh akun lain.');
+            }
+
+            $insertUser = $db->prepare(
+                "INSERT INTO users (name, email, password_hash, status, must_change_password)
+                 VALUES (:name, :email, :password_hash, 'active', 1)"
+            );
+            $insertUser->execute([
+                'name' => $name,
+                'email' => $email,
+                'password_hash' => password_hash($password, PASSWORD_DEFAULT),
+            ]);
+            $userId = (int) $db->lastInsertId();
+
+            $membership = $db->prepare(
+                "INSERT INTO tenant_users (tenant_id, user_id, role, status)
+                 VALUES (:tenant_id, :user_id, :role, 'active')"
+            );
+            $membership->execute([
+                'tenant_id' => $tenantId,
+                'user_id' => $userId,
+                'role' => $role,
+            ]);
+            audit_event($db, 'user.created', 'user', $userId, ['role' => $role]);
+            $db->commit();
+            flash('success', 'Pengguna berhasil dibuat. Pengguna wajib mengganti password saat login pertama.');
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof DomainException || ($exception instanceof PDOException && $exception->getCode() === '23000')) {
+                flash('error', $exception instanceof DomainException ? $exception->getMessage() : 'Email sudah digunakan oleh akun lain.');
+            } else {
+                throw $exception;
+            }
+        }
+        redirect('/users');
+    }
+
+    if ($action === 'update') {
+        $userId = filter_var(input('user_id'), FILTER_VALIDATE_INT);
+        $role = input('role');
+        $status = input('status');
+        if (!$userId || !in_array($role, $assignableRoles, true) || !in_array($status, ['active', 'disabled'], true)) {
+            flash('error', 'Perubahan pengguna tidak valid.');
+            redirect('/users');
+        }
+        if ($userId === (int) ($operator['id'] ?? 0)) {
+            flash('error', 'Role dan akses akun sendiri tidak dapat diubah dari halaman ini.');
+            redirect('/users');
+        }
+
+        $db->beginTransaction();
+        try {
+            $targetQuery = $db->prepare(
+                'SELECT tu.role, tu.status
+                 FROM tenant_users tu
+                 WHERE tu.tenant_id = :tenant_id AND tu.user_id = :user_id
+                 FOR UPDATE'
+            );
+            $targetQuery->execute(['tenant_id' => $tenantId, 'user_id' => $userId]);
+            $target = $targetQuery->fetch();
+            if (!$target) {
+                throw new DomainException('Pengguna tidak ditemukan pada ISP ini.');
+            }
+            if ($target['role'] === 'owner' || ($operatorRole === 'admin' && $target['role'] === 'admin')) {
+                throw new DomainException('Anda tidak dapat mengubah pengguna dengan tingkat akses tersebut.');
+            }
+
+            $updateMembership = $db->prepare(
+                'UPDATE tenant_users SET role = :role, status = :status
+                 WHERE tenant_id = :tenant_id AND user_id = :user_id'
+            );
+            $updateMembership->execute([
+                'role' => $role,
+                'status' => $status,
+                'tenant_id' => $tenantId,
+                'user_id' => $userId,
+            ]);
+            audit_event($db, 'user.membership_updated', 'user', (int) $userId, [
+                'role' => $role,
+                'status' => $status,
+            ]);
+            $db->commit();
+            flash('success', 'Role dan status pengguna berhasil diperbarui.');
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof DomainException) {
+                flash('error', $exception->getMessage());
+            } else {
+                throw $exception;
+            }
+        }
+        redirect('/users');
+    }
+
+    flash('error', 'Aksi pengguna tidak dikenali.');
+    redirect('/users');
+}
 
 if ($path === '/customers' && $method === 'POST') {
     Auth::requireBillingAccess();
@@ -251,6 +450,160 @@ if ($path === '/invoices' && $method === 'POST') {
     audit_event($db, 'invoice.created', 'invoice', (int) $db->lastInsertId(), ['number' => $number]);
     flash('success', 'Tagihan berhasil diterbitkan.');
     redirect('/invoices');
+}
+
+if ($path === '/account') {
+    $user = Auth::user();
+    View::header('Akun Saya');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Keamanan akun</p><h1>Akun saya</h1></div>
+        <span class="secure-badge">Sesi terlindungi</span>
+    </div>
+    <?php if ((int) ($user['must_change_password'] ?? 0) === 1): ?>
+        <div class="notice notice-warning">
+            Anda masih memakai password sementara. Ganti password sebelum membuka fitur lain.
+        </div>
+    <?php endif; ?>
+    <section class="account-grid">
+        <article class="panel">
+            <h2>Profil akses</h2>
+            <dl class="detail-list">
+                <div><dt>Nama</dt><dd><?= e($user['name'] ?? '') ?></dd></div>
+                <div><dt>Email</dt><dd><?= e($user['email'] ?? '') ?></dd></div>
+                <div><dt>ISP</dt><dd><?= e($user['tenant_name'] ?? '') ?></dd></div>
+                <div><dt>Role</dt><dd><span class="role-badge"><?= e($user['role'] ?? '') ?></span></dd></div>
+            </dl>
+        </article>
+        <article class="panel">
+            <h2>Ganti password</h2>
+            <p class="muted form-help"><?= e(PasswordPolicy::requirement()) ?></p>
+            <form method="post" action="/account/password" class="stack-form">
+                <?= csrf_field() ?>
+                <label>Password saat ini
+                    <input type="password" name="current_password" autocomplete="current-password" maxlength="128" required>
+                </label>
+                <label>Password baru
+                    <input type="password" name="new_password" autocomplete="new-password" minlength="12" maxlength="128" required>
+                </label>
+                <label>Ulangi password baru
+                    <input type="password" name="new_password_confirmation" autocomplete="new-password" minlength="12" maxlength="128" required>
+                </label>
+                <button class="button button-primary" type="submit">Perbarui password</button>
+            </form>
+        </article>
+    </section>
+    <?php
+    View::footer();
+    exit;
+}
+
+if ($path === '/users') {
+    Auth::requireUserManagement();
+    $operator = Auth::user();
+    $operatorRole = (string) ($operator['role'] ?? '');
+    $assignableRoles = $operatorRole === 'owner'
+        ? ['admin', 'billing', 'support', 'viewer']
+        : ['billing', 'support', 'viewer'];
+    $roleLabels = [
+        'owner' => 'Owner',
+        'admin' => 'Administrator',
+        'billing' => 'Finance / Billing',
+        'support' => 'Customer Support',
+        'viewer' => 'Read Only',
+    ];
+    $usersQuery = $db->prepare(
+        'SELECT u.id, u.name, u.email, u.last_login_at, u.must_change_password,
+                tu.role, tu.status AS membership_status
+         FROM tenant_users tu
+         INNER JOIN users u ON u.id = tu.user_id
+         WHERE tu.tenant_id = :tenant_id
+         ORDER BY FIELD(tu.role, \'owner\', \'admin\', \'billing\', \'support\', \'viewer\'), u.name'
+    );
+    $usersQuery->execute(['tenant_id' => $tenantId]);
+    $users = $usersQuery->fetchAll();
+
+    View::header('Pengguna');
+    ?>
+    <div class="page-heading">
+        <div><p class="eyebrow">Kontrol akses</p><h1>Pengguna dan role</h1></div>
+        <span class="secure-badge"><?= e(count($users)) ?> akun ISP</span>
+    </div>
+    <section class="panel">
+        <h2>Tambah pengguna</h2>
+        <p class="muted form-help">Buat password sementara yang unik. Pengguna akan diminta menggantinya saat login pertama.</p>
+        <form method="post" class="form-grid">
+            <?= csrf_field() ?>
+            <input type="hidden" name="_action" value="create">
+            <label>Nama lengkap
+                <input name="name" maxlength="120" autocomplete="name" required>
+            </label>
+            <label>Email
+                <input type="email" name="email" maxlength="190" autocomplete="email" required>
+            </label>
+            <label>Password sementara
+                <input type="password" name="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+            </label>
+            <label>Role
+                <select name="role" required>
+                    <?php foreach ($assignableRoles as $role): ?>
+                        <option value="<?= e($role) ?>"><?= e($roleLabels[$role]) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <div class="field-wide"><button class="button button-primary" type="submit">Buat pengguna</button></div>
+        </form>
+    </section>
+    <section class="panel">
+        <h2>Daftar pengguna</h2>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Pengguna</th><th>Role</th><th>Status</th><th>Login terakhir</th><th>Aksi</th></tr></thead>
+                <tbody>
+                <?php foreach ($users as $listedUser):
+                    $isSelf = (int) $listedUser['id'] === (int) ($operator['id'] ?? 0);
+                    $protectedRole = $listedUser['role'] === 'owner'
+                        || ($operatorRole === 'admin' && $listedUser['role'] === 'admin');
+                    $editable = !$isSelf && !$protectedRole;
+                    ?>
+                    <tr>
+                        <td><strong><?= e($listedUser['name']) ?></strong><small><?= e($listedUser['email']) ?></small></td>
+                        <td><span class="role-badge"><?= e($roleLabels[$listedUser['role']] ?? $listedUser['role']) ?></span></td>
+                        <td>
+                            <span class="status status-<?= e($listedUser['membership_status']) ?>"><?= e($listedUser['membership_status']) ?></span>
+                            <?php if ((int) $listedUser['must_change_password'] === 1): ?><small>Password sementara</small><?php endif; ?>
+                        </td>
+                        <td><?= e($listedUser['last_login_at'] ?: 'Belum pernah') ?></td>
+                        <td>
+                            <?php if ($editable): ?>
+                                <form method="post" class="user-row-form">
+                                    <?= csrf_field() ?>
+                                    <input type="hidden" name="_action" value="update">
+                                    <input type="hidden" name="user_id" value="<?= e($listedUser['id']) ?>">
+                                    <select name="role" aria-label="Role <?= e($listedUser['name']) ?>">
+                                        <?php foreach ($assignableRoles as $role): ?>
+                                            <option value="<?= e($role) ?>"<?= $listedUser['role'] === $role ? ' selected' : '' ?>><?= e($roleLabels[$role]) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <select name="status" aria-label="Status <?= e($listedUser['name']) ?>">
+                                        <option value="active"<?= $listedUser['membership_status'] === 'active' ? ' selected' : '' ?>>Aktif</option>
+                                        <option value="disabled"<?= $listedUser['membership_status'] === 'disabled' ? ' selected' : '' ?>>Nonaktif</option>
+                                    </select>
+                                    <button class="button button-small" type="submit">Simpan</button>
+                                </form>
+                            <?php else: ?>
+                                <span class="muted"><?= $isSelf ? 'Akun Anda' : 'Dilindungi' ?></span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    </section>
+    <?php
+    View::footer();
+    exit;
 }
 
 if ($path === '/') {

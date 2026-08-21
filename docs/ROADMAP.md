@@ -10,6 +10,16 @@ Status: dikerjakan pada branch `codex/security-runtime-hardening`.
 - pelanggan, paket, tagihan, pembayaran manual;
 - audit log dan CI security smoke test.
 
+## Fase 1.1 — Identity & access operasional
+
+Status: dikerjakan pada branch `codex/security-runtime-hardening`.
+
+- penggantian password mandiri dengan verifikasi password lama;
+- password sementara dan kewajiban ganti password saat login pertama;
+- pengelolaan pengguna serta role oleh owner/admin;
+- pembatasan eskalasi hak akses dan perlindungan akun owner;
+- penonaktifan membership secara terpisah untuk setiap tenant.
+
 ## Fase 2 — Operasional billing
 
 - CRUD lengkap dan pencarian/pagination;
